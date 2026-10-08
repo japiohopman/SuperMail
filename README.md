@@ -13,3 +13,8 @@ This repository is being built as an agentic engineering system:
 > Foundation stage only. No Gmail credentials, OAuth tokens, mailbox access, or autonomous sending are implemented yet.
 
 See AGENTS.md and docs/AGENT.md for the operating contract.
+
+
+## Automation labels
+
+The repository bootstraps its development labels from `.github/workflows/bootstrap-labels.yml`. These labels drive roadmap dispatch, Jules state, AI review, and escalation without requiring manual dashboard configuration.
