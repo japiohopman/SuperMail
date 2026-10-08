@@ -1,0 +1,15 @@
+{
+  "name": "supermail",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "lint": "node --check src/index.mjs && node --check .github/supermail-dispatcher.mjs",
+    "typecheck": "node --check src/index.mjs",
+    "build": "node --check src/index.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
