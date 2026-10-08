@@ -24,6 +24,15 @@ export const VALID_TRANSITIONS = Object.freeze({
   "merged": []
 });
 
+export const STATES_REQUIRING_CLAIM = Object.freeze([
+  "claimed",
+  "in-progress",
+  "PR",
+  "awaiting-review",
+  "changes-requested",
+  "approved"
+]);
+
 export function isValidState(state) {
   return STATES.includes(state);
 }
@@ -45,7 +54,6 @@ export function makeReviewKey(repository, pullRequest, headSha) {
 
 /**
  * Abstract Persistence Adapter Contract for Dispatcher Engine.
- * Enables separation of state engine logic from storage backend (e.g. file, memory, GitHub API store).
  */
 export class PersistenceAdapter {
   async load() {
@@ -54,6 +62,10 @@ export class PersistenceAdapter {
 
   async save(state, expectedVersion = null) {
     throw new Error("PersistenceAdapter.save() must be implemented by subclass.");
+  }
+
+  async withLock(fn) {
+    return fn();
   }
 }
 
@@ -67,6 +79,19 @@ export class MemoryPersistenceAdapter extends PersistenceAdapter {
       issues: {},
       sessions: {}
     };
+    this._locked = false;
+  }
+
+  async withLock(fn) {
+    while (this._locked) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    this._locked = true;
+    try {
+      return await fn();
+    } finally {
+      this._locked = false;
+    }
   }
 
   async load() {
@@ -89,9 +114,65 @@ export class MemoryPersistenceAdapter extends PersistenceAdapter {
 }
 
 export class FilePersistenceAdapter extends PersistenceAdapter {
-  constructor(filePath) {
+  constructor(filePath, options = {}) {
     super();
     this.filePath = filePath;
+    this.lockPath = `${filePath}.lock`;
+    this.lockTimeoutMs = options.lockTimeoutMs || 5000;
+    this.lockRetryIntervalMs = options.lockRetryIntervalMs || 10;
+  }
+
+  async acquireLock() {
+    const start = Date.now();
+    const dir = path.dirname(this.lockPath);
+    if (dir && !fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    while (Date.now() - start < this.lockTimeoutMs) {
+      try {
+        const fd = fs.openSync(this.lockPath, "wx");
+        fs.writeSync(fd, `${process.pid}\n`);
+        fs.closeSync(fd);
+        return;
+      } catch (err) {
+        if (err.code === "EEXIST") {
+          // Check for stale lockfile (>10 seconds old)
+          try {
+            const stat = fs.statSync(this.lockPath);
+            if (Date.now() - stat.mtimeMs > 10000) {
+              fs.unlinkSync(this.lockPath);
+              continue;
+            }
+          } catch {
+            // Lockfile might have been deleted concurrently
+          }
+          await new Promise((resolve) => setTimeout(resolve, this.lockRetryIntervalMs));
+        } else {
+          throw err;
+        }
+      }
+    }
+    throw new Error(`Failed to acquire lock file ${this.lockPath} within ${this.lockTimeoutMs}ms`);
+  }
+
+  releaseLock() {
+    try {
+      if (fs.existsSync(this.lockPath)) {
+        fs.unlinkSync(this.lockPath);
+      }
+    } catch {
+      // Ignore if unlinking fails during cleanup
+    }
+  }
+
+  async withLock(fn) {
+    await this.acquireLock();
+    try {
+      return await fn();
+    } finally {
+      this.releaseLock();
+    }
   }
 
   async load() {
@@ -105,18 +186,23 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
       };
     }
     const data = fs.readFileSync(this.filePath, "utf8");
-    return JSON.parse(data);
+    try {
+      return JSON.parse(data);
+    } catch (err) {
+      throw new Error(`Malformed dispatcher state file at ${this.filePath}: ${err.message}`);
+    }
   }
 
   async save(state, expectedVersion = null) {
     let currentDiskRevision = 0;
     if (fs.existsSync(this.filePath)) {
+      let currentData;
       try {
-        const currentData = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
-        currentDiskRevision = currentData.revision || 0;
-      } catch {
-        currentDiskRevision = 0;
+        currentData = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
+      } catch (err) {
+        throw new Error(`Malformed dispatcher state file at ${this.filePath}: ${err.message}`);
       }
+      currentDiskRevision = currentData.revision || 0;
     }
 
     if (expectedVersion !== null && expectedVersion !== undefined) {
@@ -165,9 +251,11 @@ export class DispatcherEngine {
   }
 
   async init() {
-    this.state = await this.adapter.load();
-    this.normalizeInvariants();
-    return this;
+    return this.adapter.withLock(async () => {
+      this.state = await this.adapter.load();
+      this.normalizeInvariants();
+      return this;
+    });
   }
 
   async sync() {
@@ -176,12 +264,6 @@ export class DispatcherEngine {
     return this;
   }
 
-  /**
-   * Enforces strict state/claim invariants across all loaded issues and sessions:
-   * 1. Status "roadmap-ready" must NEVER have an active claim or session.
-   * 2. If status is "roadmap-ready", issue.claim must be null.
-   * 3. If an issue is merged, issue.claim must be null.
-   */
   normalizeInvariants() {
     for (const issueId of Object.keys(this.state.issues)) {
       const issue = this.state.issues[issueId];
@@ -189,8 +271,9 @@ export class DispatcherEngine {
         if (issue.claim) {
           const claimId = issue.claim.claimId;
           issue.claim = null;
-          if (this.state.sessions[claimId] && this.state.sessions[claimId].status === "claimed") {
-            delete this.state.sessions[claimId];
+          if (this.state.sessions[claimId]) {
+            this.state.sessions[claimId].status = issue.status === "roadmap-ready" ? "reset" : "completed";
+            this.state.sessions[claimId].updatedAt = new Date().toISOString();
           }
         }
       }
@@ -204,51 +287,63 @@ export class DispatcherEngine {
   }
 
   async registerIssue(issue) {
-    await this.sync();
-    const issueId = String(issue.issueId || issue.number);
-    const existing = this.state.issues[issueId] || null;
+    return this.adapter.withLock(async () => {
+      await this.sync();
+      const issueId = String(issue.issueId || issue.number);
+      const existing = this.state.issues[issueId] || null;
 
-    let targetStatus = issue.status || (existing ? existing.status : "roadmap-ready");
-    if (!isValidState(targetStatus)) {
-      throw new Error(`Invalid issue status: ${targetStatus}`);
-    }
-
-    let claim = existing ? existing.claim : null;
-
-    // Safety check: Do not allow registering/overwriting an issue into an invalid state combination
-    if (existing) {
-      // Validate state transition if status is changing
-      if (existing.status !== targetStatus && !isValidTransition(existing.status, targetStatus)) {
-        throw new Error(`Cannot register issue ${issueId}: invalid state transition from ${existing.status} to ${targetStatus}`);
+      let targetStatus = issue.status || (existing ? existing.status : "roadmap-ready");
+      if (!isValidState(targetStatus)) {
+        throw new Error(`Invalid issue status: ${targetStatus}`);
       }
-    }
 
-    // Invariant: "roadmap-ready" status must NEVER retain a claim
-    if (targetStatus === "roadmap-ready" || targetStatus === "merged") {
-      claim = null;
-    }
+      let claim = existing ? existing.claim : null;
 
-    this.state.issues[issueId] = {
-      issueId,
-      title: issue.title || (existing ? existing.title : ""),
-      body: issue.body || (existing ? existing.body : ""),
-      prerequisites: issue.prerequisites ? issue.prerequisites.map(String) : (existing ? existing.prerequisites : []),
-      acceptanceCriteria: issue.acceptanceCriteria || (existing ? existing.acceptanceCriteria : []),
-      likelyModules: issue.likelyModules || (existing ? existing.likelyModules : []),
-      securityImpact: issue.securityImpact || (existing ? existing.securityImpact : "Development-plane only."),
-      repositoryInstructions: issue.repositoryInstructions || (existing ? existing.repositoryInstructions : "See AGENTS.md and docs/DISPATCH.md"),
-      validationCommands: issue.validationCommands || (existing ? existing.validationCommands : [
-        "npm test",
-        "npm run lint",
-        "npm run typecheck",
-        "npm run build"
-      ]),
-      status: targetStatus,
-      claim
-    };
+      // Reject registering into states requiring a claim if no active claim exists
+      if (STATES_REQUIRING_CLAIM.includes(targetStatus) && !claim) {
+        throw new Error(`Cannot register issue ${issueId} in status '${targetStatus}' without an active claim.`);
+      }
 
-    await this.save();
-    return this.state.issues[issueId];
+      if (existing) {
+        if (existing.status !== targetStatus && !isValidTransition(existing.status, targetStatus)) {
+          throw new Error(`Cannot register issue ${issueId}: invalid state transition from ${existing.status} to ${targetStatus}`);
+        }
+      }
+
+      // Invariant: "roadmap-ready" or "merged" status must NEVER retain an active claim
+      if (targetStatus === "roadmap-ready" || targetStatus === "merged") {
+        if (claim) {
+          const claimId = claim.claimId;
+          if (this.state.sessions[claimId]) {
+            this.state.sessions[claimId].status = targetStatus === "roadmap-ready" ? "reset" : "completed";
+            this.state.sessions[claimId].updatedAt = new Date().toISOString();
+          }
+          claim = null;
+        }
+      }
+
+      this.state.issues[issueId] = {
+        issueId,
+        title: issue.title || (existing ? existing.title : ""),
+        body: issue.body || (existing ? existing.body : ""),
+        prerequisites: issue.prerequisites ? issue.prerequisites.map(String) : (existing ? existing.prerequisites : []),
+        acceptanceCriteria: issue.acceptanceCriteria || (existing ? existing.acceptanceCriteria : []),
+        likelyModules: issue.likelyModules || (existing ? existing.likelyModules : []),
+        securityImpact: issue.securityImpact || (existing ? existing.securityImpact : "Development-plane only."),
+        repositoryInstructions: issue.repositoryInstructions || (existing ? existing.repositoryInstructions : "See AGENTS.md and docs/DISPATCH.md"),
+        validationCommands: issue.validationCommands || (existing ? existing.validationCommands : [
+          "npm test",
+          "npm run lint",
+          "npm run typecheck",
+          "npm run build"
+        ]),
+        status: targetStatus,
+        claim
+      };
+
+      await this.save();
+      return this.state.issues[issueId];
+    });
   }
 
   getIssue(issueId) {
@@ -307,154 +402,158 @@ export class DispatcherEngine {
   }
 
   async claimIssue(issueId, options = {}) {
-    await this.sync();
-    const idStr = String(issueId);
-    const nowMs = options.nowMs || Date.now();
+    return this.adapter.withLock(async () => {
+      await this.sync();
+      const idStr = String(issueId);
+      const nowMs = options.nowMs || Date.now();
 
-    // Recover stale claims prior to attempting claim
-    const recovered = this.recoverStaleClaims(nowMs);
-    if (recovered.length > 0) {
-      this.normalizeInvariants();
-    }
+      const recovered = this.recoverStaleClaims(nowMs);
+      if (recovered.length > 0) {
+        this.normalizeInvariants();
+      }
 
-    const issue = this.getIssue(idStr);
-    if (!issue) {
-      throw new Error(`Cannot claim issue ${idStr}: issue does not exist.`);
-    }
+      const issue = this.getIssue(idStr);
+      if (!issue) {
+        throw new Error(`Cannot claim issue ${idStr}: issue does not exist.`);
+      }
 
-    // STRICT INVARIANT 1: claimIssue() MAY CLAIM AN ISSUE ONLY WHEN ITS CURRENT STATUS IS EXACTLY "roadmap-ready"
-    if (issue.status !== "roadmap-ready") {
-      throw new Error(`Cannot claim issue ${idStr}: status is '${issue.status}', but must be exactly 'roadmap-ready'.`);
-    }
+      if (issue.status !== "roadmap-ready") {
+        throw new Error(`Cannot claim issue ${idStr}: status is '${issue.status}', but must be exactly 'roadmap-ready'.`);
+      }
 
-    // STRICT INVARIANT 2: An issue in roadmap-ready must not have an active claim
-    if (issue.claim) {
-      throw new Error(`Cannot claim issue ${idStr}: issue has an active claim structure.`);
-    }
+      if (issue.claim) {
+        throw new Error(`Cannot claim issue ${idStr}: issue has an active claim structure.`);
+      }
 
-    const prereqCheck = this.checkPrerequisites(idStr);
-    if (!prereqCheck.ok) {
-      throw new Error(`Cannot claim issue ${idStr}: ${prereqCheck.reason}`);
-    }
+      const prereqCheck = this.checkPrerequisites(idStr);
+      if (!prereqCheck.ok) {
+        throw new Error(`Cannot claim issue ${idStr}: ${prereqCheck.reason}`);
+      }
 
-    const nonce = options.nonce || crypto.randomBytes(4).toString("hex");
-    const claimId = makeClaimId(idStr, nonce, nowMs);
-    const leaseDuration = options.leaseDurationMs || this.leaseDurationMs;
-    const expiresAt = new Date(nowMs + leaseDuration).toISOString();
+      const nonce = options.nonce || crypto.randomBytes(4).toString("hex");
+      const claimId = makeClaimId(idStr, nonce, nowMs);
+      const leaseDuration = options.leaseDurationMs || this.leaseDurationMs;
+      const expiresAt = new Date(nowMs + leaseDuration).toISOString();
 
-    const claimData = {
-      claimId,
-      sessionId: options.sessionId || `session-${nonce}`,
-      claimedAt: new Date(nowMs).toISOString(),
-      expiresAt,
-      lastHeartbeat: new Date(nowMs).toISOString()
-    };
+      const claimData = {
+        claimId,
+        sessionId: options.sessionId || `session-${nonce}`,
+        claimedAt: new Date(nowMs).toISOString(),
+        expiresAt,
+        lastHeartbeat: new Date(nowMs).toISOString()
+      };
 
-    issue.status = "claimed";
-    issue.claim = claimData;
+      issue.status = "claimed";
+      issue.claim = claimData;
 
-    this.state.sessions[claimId] = {
-      claimId,
-      issueId: idStr,
-      status: "claimed",
-      createdAt: claimData.claimedAt,
-      updatedAt: claimData.claimedAt,
-      expiresAt,
-      pullRequest: null,
-      headSha: null
-    };
+      this.state.sessions[claimId] = {
+        claimId,
+        issueId: idStr,
+        status: "claimed",
+        createdAt: claimData.claimedAt,
+        updatedAt: claimData.claimedAt,
+        expiresAt,
+        pullRequest: null,
+        headSha: null
+      };
 
-    await this.save();
+      await this.save();
 
-    return {
-      claimId,
-      issue,
-      session: this.state.sessions[claimId]
-    };
+      return {
+        claimId,
+        issue,
+        session: this.state.sessions[claimId]
+      };
+    });
   }
 
   async heartbeatClaim(claimId, options = {}) {
-    await this.sync();
-    const nowMs = options.nowMs || Date.now();
-    const session = this.state.sessions[claimId];
-    if (!session) {
-      throw new Error(`Session with claimId ${claimId} not found.`);
-    }
+    return this.adapter.withLock(async () => {
+      await this.sync();
+      const nowMs = options.nowMs || Date.now();
+      const session = this.state.sessions[claimId];
+      if (!session) {
+        throw new Error(`Session with claimId ${claimId} not found.`);
+      }
 
-    const issue = this.getIssue(session.issueId);
-    if (!issue || !issue.claim || issue.claim.claimId !== claimId) {
-      throw new Error(`Active claim for claimId ${claimId} not found on issue ${session.issueId}.`);
-    }
+      const issue = this.getIssue(session.issueId);
+      if (!issue || !issue.claim || issue.claim.claimId !== claimId) {
+        throw new Error(`Active claim for claimId ${claimId} not found on issue ${session.issueId}.`);
+      }
 
-    const leaseDuration = options.leaseDurationMs || this.leaseDurationMs;
-    const expiresAt = new Date(nowMs + leaseDuration).toISOString();
+      const leaseDuration = options.leaseDurationMs || this.leaseDurationMs;
+      const expiresAt = new Date(nowMs + leaseDuration).toISOString();
 
-    issue.claim.lastHeartbeat = new Date(nowMs).toISOString();
-    issue.claim.expiresAt = expiresAt;
+      issue.claim.lastHeartbeat = new Date(nowMs).toISOString();
+      issue.claim.expiresAt = expiresAt;
 
-    session.updatedAt = new Date(nowMs).toISOString();
-    session.expiresAt = expiresAt;
+      session.updatedAt = new Date(nowMs).toISOString();
+      session.expiresAt = expiresAt;
 
-    await this.save();
-    return { issue, session };
+      await this.save();
+      return { issue, session };
+    });
   }
 
   async releaseClaim(claimId, reason = "released") {
-    await this.sync();
-    const session = this.state.sessions[claimId];
-    if (!session) {
-      throw new Error(`Session with claimId ${claimId} not found.`);
-    }
+    return this.adapter.withLock(async () => {
+      await this.sync();
+      const session = this.state.sessions[claimId];
+      if (!session) {
+        throw new Error(`Session with claimId ${claimId} not found.`);
+      }
 
-    const issue = this.getIssue(session.issueId);
-    if (issue) {
-      // STRICT INVARIANT: Transitioning back to "roadmap-ready" clears claim and session atomically
-      issue.status = "roadmap-ready";
-      issue.claim = null;
-    }
+      const issue = this.getIssue(session.issueId);
+      if (issue) {
+        issue.status = "roadmap-ready";
+        issue.claim = null;
+      }
 
-    session.status = `released: ${reason}`;
-    session.updatedAt = new Date().toISOString();
+      session.status = `released: ${reason}`;
+      session.updatedAt = new Date().toISOString();
 
-    await this.save();
-    return { issue, session };
+      await this.save();
+      return { issue, session };
+    });
   }
 
   async updateStatus(issueId, newStatus, extraData = {}) {
-    await this.sync();
-    const idStr = String(issueId);
-    const issue = this.getIssue(idStr);
-    if (!issue) {
-      throw new Error(`Issue ${idStr} not found.`);
-    }
-
-    if (!isValidState(newStatus)) {
-      throw new Error(`Invalid state: ${newStatus}`);
-    }
-
-    if (!isValidTransition(issue.status, newStatus)) {
-      throw new Error(`Invalid state transition from ${issue.status} to ${newStatus}`);
-    }
-
-    issue.status = newStatus;
-
-    if (issue.claim) {
-      const session = this.state.sessions[issue.claim.claimId];
-      if (session) {
-        session.status = newStatus;
-        session.updatedAt = new Date().toISOString();
-        if (extraData.pullRequest) session.pullRequest = extraData.pullRequest;
-        if (extraData.headSha) session.headSha = extraData.headSha;
+    return this.adapter.withLock(async () => {
+      await this.sync();
+      const idStr = String(issueId);
+      const issue = this.getIssue(idStr);
+      if (!issue) {
+        throw new Error(`Issue ${idStr} not found.`);
       }
-    }
 
-    // STRICT INVARIANT: "roadmap-ready" or "merged" must clear issue.claim
-    if (newStatus === "roadmap-ready" || newStatus === "merged") {
-      issue.claim = null;
-    }
+      if (!isValidState(newStatus)) {
+        throw new Error(`Invalid state: ${newStatus}`);
+      }
 
-    await this.save();
-    return issue;
+      if (!isValidTransition(issue.status, newStatus)) {
+        throw new Error(`Invalid state transition from ${issue.status} to ${newStatus}`);
+      }
+
+      issue.status = newStatus;
+
+      if (issue.claim) {
+        const claimId = issue.claim.claimId;
+        const session = this.state.sessions[claimId];
+        if (session) {
+          session.status = (newStatus === "roadmap-ready" || newStatus === "merged") ? (newStatus === "roadmap-ready" ? "reset" : "completed") : newStatus;
+          session.updatedAt = new Date().toISOString();
+          if (extraData.pullRequest) session.pullRequest = extraData.pullRequest;
+          if (extraData.headSha) session.headSha = extraData.headSha;
+        }
+      }
+
+      if (newStatus === "roadmap-ready" || newStatus === "merged") {
+        issue.claim = null;
+      }
+
+      await this.save();
+      return issue;
+    });
   }
 
   generateHandoffPacket(issueId) {

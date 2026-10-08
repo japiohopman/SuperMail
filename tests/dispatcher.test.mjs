@@ -45,7 +45,14 @@ test("strict claim invariant: claiming non-roadmap-ready issue is rejected", asy
   const engine = new DispatcherEngine({ filePath });
   await engine.init();
 
-  await engine.registerIssue({ issueId: "1", status: "merged" });
+  await engine.registerIssue({ issueId: "1", status: "roadmap-ready" });
+  await engine.claimIssue("1", { nonce: "setup" });
+  await engine.updateStatus("1", "in-progress");
+  await engine.updateStatus("1", "PR");
+  await engine.updateStatus("1", "awaiting-review");
+  await engine.updateStatus("1", "approved");
+  await engine.updateStatus("1", "merged");
+
   await engine.registerIssue({ issueId: "3", prerequisites: ["1"], status: "roadmap-ready" });
 
   await engine.claimIssue("3", { nonce: "worker-1" });
@@ -80,7 +87,7 @@ test("strict state/claim invariant: roadmap-ready status cannot retain active cl
   const { claimId } = await engine.claimIssue("3", { nonce: "worker-1" });
 
   assert.ok(engine.getIssue("3").claim);
-  assert.ok(engine.getSession(claimId));
+  assert.equal(engine.getSession(claimId).status, "claimed");
 
   // Release claim back to roadmap-ready
   await engine.releaseClaim(claimId, "manual reset");
@@ -89,9 +96,35 @@ test("strict state/claim invariant: roadmap-ready status cannot retain active cl
   assert.equal(issue.status, "roadmap-ready");
   assert.equal(issue.claim, null);
 
+  // Session must move to terminal/reset status
+  const session = engine.getSession(claimId);
+  assert.equal(session.status, "released: manual reset");
+
   // Re-registering issue in roadmap-ready status must not reinstate claim
   await engine.registerIssue({ issueId: "3", status: "roadmap-ready" });
   assert.equal(engine.getIssue("3").claim, null);
+});
+
+test("registerIssue safety: rejecting claim-requiring states when no claim exists", async () => {
+  const filePath = getTempStateFilePath();
+  const engine = new DispatcherEngine({ filePath });
+  await engine.init();
+
+  // Attempt to register a new issue directly in 'claimed' or 'in-progress' without a claim
+  await assert.rejects(
+    async () => { await engine.registerIssue({ issueId: "10", status: "claimed" }); },
+    /without an active claim/
+  );
+
+  await assert.rejects(
+    async () => { await engine.registerIssue({ issueId: "10", status: "in-progress" }); },
+    /without an active claim/
+  );
+
+  await assert.rejects(
+    async () => { await engine.registerIssue({ issueId: "10", status: "PR" }); },
+    /without an active claim/
+  );
 });
 
 test("dependency blocking before dispatch", async () => {
@@ -155,34 +188,49 @@ test("stale claim recovery", async () => {
   assert.equal(engine.getIssue("3").status, "claimed");
 });
 
-test("CAS concurrency control prevents stale overwrites across instances", async () => {
+test("genuinely concurrent claim race with Promise.allSettled: exactly one claim succeeds", async () => {
   const filePath = getTempStateFilePath();
 
-  const adapterA = new FilePersistenceAdapter(filePath);
-  const adapterB = new FilePersistenceAdapter(filePath);
+  const adapter = new FilePersistenceAdapter(filePath);
+  const engine = new DispatcherEngine({ adapter });
+  await engine.init();
+  await engine.registerIssue({ issueId: "42", status: "roadmap-ready" });
 
-  const engineA = new DispatcherEngine({ adapter: adapterA });
-  const engineB = new DispatcherEngine({ adapter: adapterB });
+  // Spawn 5 concurrent claim calls
+  const promises = Array.from({ length: 5 }, (_, i) => {
+    const runnerEngine = new DispatcherEngine({ adapter });
+    return runnerEngine.claimIssue("42", { nonce: `runner-${i}` });
+  });
 
-  await engineA.init();
-  await engineA.registerIssue({ issueId: "3", status: "roadmap-ready" });
+  const results = await Promise.allSettled(promises);
 
-  // Both engines load state at revision 1
-  await engineA.sync();
-  await engineB.sync();
+  const fulfilled = results.filter((r) => r.status === "fulfilled");
+  const rejected = results.filter((r) => r.status === "rejected");
 
-  // engineA claims issue 3 and writes revision 2
-  await engineA.claimIssue("3", { nonce: "runner-A" });
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 4);
 
-  // engineB attempts a write using its stale revision 1 state
-  engineB.state.issues["3"].title = "Stale overwrite attempt";
+  // Verify the rejected calls failed with either claim status error or CAS conflict
+  for (const r of rejected) {
+    assert.ok(
+      /must be exactly 'roadmap-ready'|CAS conflict/.test(r.reason.message),
+      `Unexpected failure reason: ${r.reason.message}`
+    );
+  }
+});
+
+test("FilePersistenceAdapter handles malformed state JSON by throwing syntax error", async () => {
+  const filePath = getTempStateFilePath();
+  fs.writeFileSync(filePath, "{ invalid json ...", "utf8");
+
+  const adapter = new FilePersistenceAdapter(filePath);
   await assert.rejects(
-    async () => { await engineB.save(); },
-    /CAS conflict/
+    async () => { await adapter.load(); },
+    /Malformed dispatcher state file/
   );
 });
 
-test("registerIssue safety against invalid state combinations", async () => {
+test("registerIssue safety against invalid state transitions", async () => {
   const filePath = getTempStateFilePath();
   const engine = new DispatcherEngine({ filePath });
   await engine.init();
@@ -197,7 +245,7 @@ test("registerIssue safety against invalid state combinations", async () => {
     /invalid state transition from in-progress to merged/
   );
 
-  // Registering with roadmap-ready status clears active claim
+  // Registering with roadmap-ready status clears active claim and moves session to reset
   await engine.registerIssue({ issueId: "5", status: "roadmap-ready" });
   assert.equal(engine.getIssue("5").status, "roadmap-ready");
   assert.equal(engine.getIssue("5").claim, null);

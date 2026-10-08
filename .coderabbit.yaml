@@ -3,29 +3,19 @@
 language: "en-US"
 
 early_access: false
-enable_free_tier: true
-
-tone_instructions: >-
-  Be direct, evidence-based, and architecture-aware.
-  Report concrete correctness, security, regression, and scope risks.
-  Prefer actionable findings over style nits.
 
 reviews:
   profile: "assertive"
   request_changes_workflow: true
   high_level_summary: true
   review_status: true
-  commit_status: true
-  poem: false
   collapse_walkthrough: true
 
   auto_review:
     enabled: true
     drafts: true
-    auto_incremental_review: true
-
-  pre_merge_checks:
-    mode: "error"
+    base_branches:
+      - "main"
 
   path_instructions:
     - path: "**/*"
@@ -47,13 +37,6 @@ reviews:
         For Gmail-related changes, scrutinize OAuth scopes, state validation,
         token handling, mailbox data boundaries, destructive actions, and
         untrusted email content.
-
-knowledge_base:
-  code_guidelines:
-    filePatterns:
-      - "AGENTS.md"
-      - "docs/**/*.md"
-      - "**/README.md"
 
 chat:
   auto_reply: true

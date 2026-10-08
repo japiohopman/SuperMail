@@ -22,10 +22,10 @@ Valid state transitions enforced by the dispatcher engine:
    `claimIssue()` may claim an issue **only** when its current status is strictly `"roadmap-ready"`. Attempting to claim an issue in any other state (e.g., `claimed`, `in-progress`, `PR`, `merged`) is strictly rejected, regardless of whether a claim object exists.
 
 2. **Strict State/Claim Invariant:**
-   `"roadmap-ready"` (and `"merged"`) must **never** coexist with an active claim or session. Any release, reset, or transition back to `"roadmap-ready"` clears the issue claim and associated session atomically.
+   `"roadmap-ready"` (and `"merged"`) must **never** coexist with an active claim or session. Any release, reset, or transition back to `"roadmap-ready"` clears the issue claim and moves the associated session to a terminal/reset status (`reset`, `completed`, or `released`).
 
 3. **Register Safety:**
-   `registerIssue()` validates existing state transitions and prevents registering or updating an issue into an impossible or corrupt state/claim combination.
+   `registerIssue()` validates existing state transitions and prevents registering an issue in states requiring a claim (`claimed`, `in-progress`, `PR`, `awaiting-review`, `changes-requested`, `approved`) if no active claim exists.
 
 4. **No Ambient Randomness:**
    Dispatcher control-plane identifiers (nonces, temporary filenames, unique tags) use cryptographic primitives (`crypto.randomBytes()`) rather than pseudo-random functions like `Math.random()`.
@@ -37,15 +37,14 @@ Local JSON file state on a GitHub Actions runner is an ephemeral execution artif
 
 To maintain clean separation of concerns:
 - **`DispatcherEngine`**: Pure state machine and lifecycle invariant engine.
-- **`PersistenceAdapter`**: Abstract storage contract defining `load()` and `save(state, expectedRevision)`.
-- **`FilePersistenceAdapter`**: Default local file persistence adapter with Compare-And-Swap (CAS) revision checking.
-- **`MemoryPersistenceAdapter`**: In-memory adapter with CAS revision checking for testing and process-isolated workflows.
+- **`PersistenceAdapter`**: Abstract storage contract defining `load()`, `save(state, expectedRevision)`, and `withLock(fn)`.
+- **`FilePersistenceAdapter`**: Default local file persistence adapter with exclusive cross-process file locking (`.lock`) and Compare-And-Swap (CAS) revision checking.
+- **`MemoryPersistenceAdapter`**: In-memory adapter with in-process locking and CAS revision checking for testing and process-isolated workflows.
 - **Shared Orchestration Layer (#6)**: Future persistent adapter providing cross-runner durability (e.g., GitHub State API / issue store / central store).
 
-### Concurrency Guarantees (CAS / Optimistic Locking)
-Every state modification increments an explicit integer `revision`. Persistence adapters enforce Compare-And-Swap (CAS):
-- When saving, the adapter checks whether the current store revision matches the expected revision loaded before the modification.
-- If two processes attempt concurrent claims or state transitions on the same initial revision, the second write fails with a CAS conflict (`CAS conflict: expected revision X, but current is Y`).
+### Concurrency Guarantees (Cross-Process Locking + CAS)
+1. **Exclusive Lock Execution:** File operations (`load` + modification + `save`) acquire a process-exclusive `.lock` file to prevent concurrent read/modify/write race conditions across local processes.
+2. **CAS / Revision Checking:** Every state modification increments an explicit integer `revision`. When saving, the adapter verifies whether the store revision matches the expected revision loaded before the modification, failing with a CAS conflict (`CAS conflict: expected version X, but current is Y`) if modified concurrently.
 
 ## State schema format
 
@@ -123,7 +122,7 @@ The dispatcher generates a deterministic handoff packet containing:
    - `recoverStaleClaims()` automatically identifies expired claims (`now > expiresAt`), updates session status to `stale-recovered`, and resets the issue status back to `roadmap-ready` while clearing `issue.claim`.
 
 2. **Manual Session Release / Reset:**
-   - Calling `engine.releaseClaim(claimId, "operational recovery")` sets the issue back to `roadmap-ready` and atomically clears `issue.claim`.
+   - Calling `engine.releaseClaim(claimId, "operational recovery")` sets the issue back to `roadmap-ready`, updates session status to `released: operational recovery`, and atomically clears `issue.claim`.
 
 3. **Session Re-claiming:**
    - Once reset to `roadmap-ready`, the issue can be safely claimed by a new session.
