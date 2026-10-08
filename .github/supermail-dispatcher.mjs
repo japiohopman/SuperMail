@@ -120,6 +120,7 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
     this.lockPath = `${filePath}.lock`;
     this.lockTimeoutMs = options.lockTimeoutMs || 5000;
     this.lockRetryIntervalMs = options.lockRetryIntervalMs || 10;
+    this._currentOwnerToken = null;
   }
 
   async acquireLock() {
@@ -129,11 +130,14 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
       fs.mkdirSync(dir, { recursive: true });
     }
 
+    const ownerToken = `${process.pid}:${crypto.randomBytes(8).toString("hex")}`;
+
     while (Date.now() - start < this.lockTimeoutMs) {
       try {
         const fd = fs.openSync(this.lockPath, "wx");
-        fs.writeSync(fd, `${process.pid}\n`);
+        fs.writeSync(fd, ownerToken);
         fs.closeSync(fd);
+        this._currentOwnerToken = ownerToken;
         return;
       } catch (err) {
         if (err.code === "EEXIST") {
@@ -141,11 +145,17 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
           try {
             const stat = fs.statSync(this.lockPath);
             if (Date.now() - stat.mtimeMs > 10000) {
-              fs.unlinkSync(this.lockPath);
+              const stalePath = `${this.lockPath}.stale.${Date.now()}.${crypto.randomBytes(4).toString("hex")}`;
+              try {
+                fs.renameSync(this.lockPath, stalePath);
+                fs.unlinkSync(stalePath);
+              } catch {
+                // Ignore if rename or unlink failed due to concurrent lock activity
+              }
               continue;
             }
           } catch {
-            // Lockfile might have been deleted concurrently
+            // Lockfile might have been deleted/renamed concurrently
           }
           await new Promise((resolve) => setTimeout(resolve, this.lockRetryIntervalMs));
         } else {
@@ -157,12 +167,19 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
   }
 
   releaseLock() {
+    const ownerToken = this._currentOwnerToken;
+    this._currentOwnerToken = null;
+    if (!ownerToken) return;
+
     try {
       if (fs.existsSync(this.lockPath)) {
-        fs.unlinkSync(this.lockPath);
+        const content = fs.readFileSync(this.lockPath, "utf8").trim();
+        if (content === ownerToken) {
+          fs.unlinkSync(this.lockPath);
+        }
       }
     } catch {
-      // Ignore if unlinking fails during cleanup
+      // Ignore cleanup errors
     }
   }
 
@@ -504,10 +521,16 @@ export class DispatcherEngine {
       }
 
       const issue = this.getIssue(session.issueId);
-      if (issue) {
-        issue.status = "roadmap-ready";
-        issue.claim = null;
+      if (!issue) {
+        throw new Error(`Cannot release claim ${claimId}: issue ${session.issueId} not found.`);
       }
+
+      if (!issue.claim || issue.claim.claimId !== claimId) {
+        throw new Error(`Cannot release claim ${claimId}: claim ID does not match active claim on issue ${session.issueId}.`);
+      }
+
+      issue.status = "roadmap-ready";
+      issue.claim = null;
 
       session.status = `released: ${reason}`;
       session.updatedAt = new Date().toISOString();
@@ -532,6 +555,11 @@ export class DispatcherEngine {
 
       if (!isValidTransition(issue.status, newStatus)) {
         throw new Error(`Invalid state transition from ${issue.status} to ${newStatus}`);
+      }
+
+      // Reject transition to states requiring a claim if issue has no active claim
+      if (STATES_REQUIRING_CLAIM.includes(newStatus) && !issue.claim) {
+        throw new Error(`Cannot transition issue ${idStr} to status '${newStatus}' without an active claim.`);
       }
 
       issue.status = newStatus;

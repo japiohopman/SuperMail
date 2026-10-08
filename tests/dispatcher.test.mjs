@@ -105,6 +105,51 @@ test("strict state/claim invariant: roadmap-ready status cannot retain active cl
   assert.equal(engine.getIssue("3").claim, null);
 });
 
+test("releaseClaim safety: rejecting stale or wrong claim IDs without mutating state", async () => {
+  const filePath = getTempStateFilePath();
+  const engine = new DispatcherEngine({ filePath });
+  await engine.init();
+
+  await engine.registerIssue({ issueId: "7", status: "roadmap-ready" });
+  const { claimId: activeClaimId } = await engine.claimIssue("7", { nonce: "active-runner" });
+
+  // Attempt to release using an unassociated or stale claim ID
+  await assert.rejects(
+    async () => { await engine.releaseClaim("jules-999-7-stalerunner", "stale reset"); },
+    /Session with claimId jules-999-7-stalerunner not found/
+  );
+
+  // Issue status and active claim must remain unchanged
+  const issue = engine.getIssue("7");
+  assert.equal(issue.status, "claimed");
+  assert.equal(issue.claim.claimId, activeClaimId);
+});
+
+test("updateStatus safety: rejecting claim-requiring status without active claim", async () => {
+  const filePath = getTempStateFilePath();
+  const engine = new DispatcherEngine({ filePath });
+  await engine.init();
+
+  await engine.registerIssue({ issueId: "8", status: "roadmap-ready" });
+
+  // Attempting to directly updateStatus to 'claimed' or 'in-progress' without an active claim must fail
+  await assert.rejects(
+    async () => { await engine.updateStatus("8", "claimed"); },
+    /without an active claim/
+  );
+
+  // Create issue in claimed status via claimIssue, then remove claim manually from state
+  await engine.claimIssue("8", { nonce: "worker" });
+  engine.state.issues["8"].claim = null;
+  await engine.save();
+
+  // Now in 'claimed' status but without claim structure
+  await assert.rejects(
+    async () => { await engine.updateStatus("8", "in-progress"); },
+    /without an active claim/
+  );
+});
+
 test("registerIssue safety: rejecting claim-requiring states when no claim exists", async () => {
   const filePath = getTempStateFilePath();
   const engine = new DispatcherEngine({ filePath });
@@ -188,16 +233,17 @@ test("stale claim recovery", async () => {
   assert.equal(engine.getIssue("3").status, "claimed");
 });
 
-test("genuinely concurrent claim race with Promise.allSettled: exactly one claim succeeds", async () => {
+test("genuinely concurrent claim race with separate FilePersistenceAdapter instances: exactly one claim succeeds", async () => {
   const filePath = getTempStateFilePath();
 
-  const adapter = new FilePersistenceAdapter(filePath);
-  const engine = new DispatcherEngine({ adapter });
-  await engine.init();
-  await engine.registerIssue({ issueId: "42", status: "roadmap-ready" });
+  // Setup initial issue state
+  const initEngine = new DispatcherEngine({ adapter: new FilePersistenceAdapter(filePath) });
+  await initEngine.init();
+  await initEngine.registerIssue({ issueId: "42", status: "roadmap-ready" });
 
-  // Spawn 5 concurrent claim calls
+  // Spawn 5 independent runner engines, each with its OWN FilePersistenceAdapter instance
   const promises = Array.from({ length: 5 }, (_, i) => {
+    const adapter = new FilePersistenceAdapter(filePath);
     const runnerEngine = new DispatcherEngine({ adapter });
     return runnerEngine.claimIssue("42", { nonce: `runner-${i}` });
   });

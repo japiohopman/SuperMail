@@ -26,9 +26,11 @@ Future reviewers (such as self-hosted models or event-triggered review tasks) in
 Reviews evaluate:
 - Repository instructions (`AGENTS.md`, `docs/DISPATCH.md`)
 - Linked issue details and acceptance criteria
+- PR body and explicit `@Jules` instructions
 - Full pull request diff
-- CI test and check status
+- Current CI build and test execution status
 - Security impact and architecture boundaries
+- Previous review state and historical feedback for the current PR head SHA
 
 Reviewers must never execute untrusted pull-request code.
 
