@@ -14,16 +14,21 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Ensure review label exists
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh label create ai-review --color 0e8a16 --description "PR is awaiting automated AI review" --force
+          GH_REPO: ${{ github.repository }}
+        run: gh label create ai-review --color 0e8a16 --description "PR is awaiting automated AI review" --force --repo "$GH_REPO"
 
       - name: Mark PR for AI review
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          gh pr edit "$PR_NUMBER" --add-label "ai-review"
-          gh pr comment "$PR_NUMBER" --body "AI review requested for head SHA $HEAD_SHA. Review contract: issue, acceptance criteria, full diff, CI, architecture, security, and regression risk."
+          gh pr edit "$PR_NUMBER" --add-label "ai-review" --repo "$GH_REPO"
+          gh pr comment "$PR_NUMBER" --body "AI review requested for head SHA $HEAD_SHA. Review contract: issue, acceptance criteria, full diff, CI, architecture, security, and regression risk." --repo "$GH_REPO"
