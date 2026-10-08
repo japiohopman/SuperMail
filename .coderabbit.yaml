@@ -19,6 +19,11 @@ reviews:
   poem: false
   collapse_walkthrough: true
 
+  auto_review:
+    enabled: true
+    drafts: true
+    auto_incremental_review: true
+
   pre_merge_checks:
     mode: "error"
 
@@ -49,11 +54,6 @@ knowledge_base:
       - "AGENTS.md"
       - "docs/**/*.md"
       - "**/README.md"
-
-auto_review:
-  enabled: true
-  drafts: false
-  auto_incremental_review: true
 
 chat:
   auto_reply: true
