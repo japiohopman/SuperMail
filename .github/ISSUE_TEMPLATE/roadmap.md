@@ -2,7 +2,7 @@
 name: Roadmap implementation
 about: Dependency-aware implementation task for the autonomous development loop
 title: ""
-labels: "roadmap-ready"
+labels: "enhancement"
 assignees: ""
 ---
 
@@ -29,3 +29,6 @@ Commands/tests that must pass:
 ## Jules instructions
 
 @Jules Implement only the scope described above. Do not expand the task without updating the issue first. Add or update tests and documentation as needed. Return a PR with verification results.
+
+
+<!-- roadmap-ready is intentionally NOT assigned by this template. Only ChatGPT/the dispatcher may mark an issue roadmap-ready after dependencies and acceptance criteria have been verified. -->
