@@ -1,0 +1,29 @@
+name: AI Review Handoff
+
+on:
+  pull_request_target:
+    types: [opened, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  handoff:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure review label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh label create ai-review --color 0e8a16 --description "PR is awaiting automated AI review" --force
+
+      - name: Mark PR for AI review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh pr edit "$PR_NUMBER" --add-label "ai-review"
+          gh pr comment "$PR_NUMBER" --body "AI review requested for head SHA $HEAD_SHA. Review contract: issue, acceptance criteria, full diff, CI, architecture, security, and regression risk."
