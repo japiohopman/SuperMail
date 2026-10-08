@@ -1,0 +1,30 @@
+name: Bootstrap workflow labels
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure SuperMail labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create roadmap-ready --color 1d76db --description "Issue is ready for dependency-aware dispatch" --force
+          gh label create claimed --color 7057ff --description "Issue has an active dispatcher claim" --force
+          gh label create in-progress --color 5319e7 --description "Jules is implementing this issue" --force
+          gh label create ai-review --color 0e8a16 --description "PR is awaiting automated AI review" --force
+          gh label create ai-approved --color 2da44e --description "AI review passed for current head SHA" --force
+          gh label create needs-changes --color d73a4a --description "AI review found required changes" --force
+          gh label create escalated --color b60205 --description "Human or higher-level review is required" --force
+          gh label create security --color b60205 --description "Security-sensitive change" --force
+          gh label create gmail --color 0366d6 --description "Gmail integration" --force
+          gh label create dispatcher --color 5319e7 --description "Development dispatcher" --force
+          gh label create jules --color 1d76db --description "Jules implementation" --force
