@@ -9,14 +9,14 @@ test("GmailOAuthClient requires mandatory credentials", () => {
   assert.throws(() => client.getAuthorizationUrl(), /Missing OAuth credential: clientId/);
 });
 
-test("GmailOAuthClient constructs authorization URL with least privilege read scope", () => {
+test("GmailOAuthClient constructs authorization URL with least privilege read scope and non-guessable state", () => {
   const client = new GmailOAuthClient({
     clientId: "test_client_id",
     clientSecret: "test_client_secret",
     redirectUri: "http://localhost:3000/oauth/callback"
   });
 
-  const urlStr = client.getAuthorizationUrl({ state: "xyz123" });
+  const { url: urlStr, state } = client.getAuthorizationUrl({ state: "xyz123" });
   const url = new URL(urlStr);
 
   assert.equal(url.origin, "https://accounts.google.com");
@@ -28,6 +28,12 @@ test("GmailOAuthClient constructs authorization URL with least privilege read sc
   assert.equal(url.searchParams.get("access_type"), "offline");
   assert.equal(url.searchParams.get("prompt"), "consent");
   assert.equal(url.searchParams.get("state"), "xyz123");
+  assert.equal(state, "xyz123");
+
+  // Auto-generated state when omitted
+  const autoRes = client.getAuthorizationUrl();
+  assert.ok(autoRes.state);
+  assert.ok(autoRes.state.length >= 32);
 });
 
 test("GmailOAuthClient rejects unapproved non-readonly scopes", () => {
@@ -40,6 +46,24 @@ test("GmailOAuthClient rejects unapproved non-readonly scopes", () => {
   assert.throws(
     () => client.getAuthorizationUrl({ scopes: ["https://www.googleapis.com/auth/gmail.send"] }),
     /not approved/
+  );
+});
+
+test("GmailOAuthClient verifies CSRF state in code exchange", async () => {
+  const client = new GmailOAuthClient({
+    clientId: "test_client_id",
+    clientSecret: "test_client_secret",
+    redirectUri: "http://localhost:3000/oauth/callback"
+  });
+
+  await assert.rejects(
+    () => client.exchangeCodeForTokens("code_123", { state: "", expectedState: "valid_state" }),
+    /missing state/
+  );
+
+  await assert.rejects(
+    () => client.exchangeCodeForTokens("code_123", { state: "invalid_state", expectedState: "valid_state" }),
+    /state parameter mismatch/
   );
 });
 
@@ -71,7 +95,7 @@ test("GmailOAuthClient exchanges authorization code for tokens using mock fetch"
     fetchFn: mockFetch
   });
 
-  const tokens = await client.exchangeCodeForTokens("auth_code_999");
+  const tokens = await client.exchangeCodeForTokens("auth_code_999", { state: "valid_state", expectedState: "valid_state" });
 
   assert.equal(requestedUrl, "https://oauth2.googleapis.com/token");
   assert.ok(requestedBody.includes("grant_type=authorization_code"));
@@ -132,7 +156,7 @@ test("sanitizeLogOutput redacts secrets and OAuth parameters", () => {
   assert.ok(cleanLog.includes("code=[REDACTED]"));
 });
 
-test("GmailAdapter orchestrates authentication flow and token validity check", async () => {
+test("GmailAdapter orchestrates authentication flow with state validation and one-time consumption", async () => {
   const tokenStore = new TokenStore();
 
   const mockFetch = async () => {
@@ -158,14 +182,32 @@ test("GmailAdapter orchestrates authentication flow and token validity check", a
 
   const adapter = new GmailAdapter({ tokenStore, oauthClient });
 
-  // Get Auth URL
-  const authUrl = adapter.getAuthUrl({ state: "session123" });
-  assert.ok(authUrl.includes("state=session123"));
+  // Get Auth URL and generated state
+  const { url: authUrl, state } = adapter.getAuthUrl();
+  assert.ok(authUrl.includes(`state=${state}`));
 
-  // Handle Callback
-  await adapter.handleOAuthCallback("code_from_callback");
+  // Rejects callback without state
+  await assert.rejects(
+    () => adapter.handleOAuthCallback("code_from_callback", ""),
+    /state parameter is required/
+  );
 
-  // Get Valid Access Token (not expired)
+  // Rejects callback with invalid state
+  await assert.rejects(
+    () => adapter.handleOAuthCallback("code_from_callback", "wrong_state"),
+    /invalid or expired state/
+  );
+
+  // Handle Callback with valid state
+  await adapter.handleOAuthCallback("code_from_callback", state);
+
+  // One-time state consumption prevents replay
+  await assert.rejects(
+    () => adapter.handleOAuthCallback("code_from_callback", state),
+    /invalid or expired state/
+  );
+
+  // Get Valid Access Token
   const validToken = await adapter.getValidAccessToken();
   assert.equal(validToken, "initial_access_token");
 });

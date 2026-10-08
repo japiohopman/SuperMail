@@ -13,24 +13,39 @@ export class GmailAdapter {
   constructor(options = {}) {
     this.tokenStore = options.tokenStore || new TokenStore();
     this.oauthClient = options.oauthClient || new GmailOAuthClient({ tokenStore: this.tokenStore });
+    this._pendingStates = new Set();
   }
 
   /**
-   * Get authentication URL for initiating user OAuth flow.
+   * Get authentication URL for initiating user OAuth flow and store issued state for verification.
    * @param {Object} [options]
-   * @returns {string}
+   * @returns {{ url: string, state: string }}
    */
   getAuthUrl(options) {
-    return this.oauthClient.getAuthorizationUrl(options);
+    const res = this.oauthClient.getAuthorizationUrl(options);
+    this._pendingStates.add(res.state);
+    return res;
   }
 
   /**
-   * Handle OAuth callback authorization code.
+   * Handle OAuth callback authorization code with mandatory CSRF state verification.
    * @param {string} code
+   * @param {string} state
    * @returns {Promise<void>}
    */
-  async handleOAuthCallback(code) {
-    await this.oauthClient.exchangeCodeForTokens(code);
+  async handleOAuthCallback(code, state) {
+    if (!state) {
+      throw new Error("CSRF security verification failed: state parameter is required in callback");
+    }
+
+    if (!this._pendingStates.has(state)) {
+      throw new Error("CSRF security verification failed: invalid or expired state parameter");
+    }
+
+    // One-time consumption of state
+    this._pendingStates.delete(state);
+
+    await this.oauthClient.exchangeCodeForTokens(code, { state, expectedState: state });
   }
 
   /**

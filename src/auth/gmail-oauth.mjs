@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 export const GMAIL_SCOPES = Object.freeze({
   READONLY: "https://www.googleapis.com/auth/gmail.readonly"
 });
@@ -60,13 +62,13 @@ export class GmailOAuthClient {
   }
 
   /**
-   * Generates explicit authorization URL for Google OAuth flow.
+   * Generates explicit authorization URL for Google OAuth flow along with the generated/validated state.
    * @param {Object} [options]
    * @param {Array<string>} [options.scopes]
    * @param {string} [options.state]
    * @param {string} [options.prompt]
    * @param {string} [options.accessType]
-   * @returns {string}
+   * @returns {{ url: string, state: string }}
    */
   getAuthorizationUrl(options = {}) {
     this.validateCredentials();
@@ -80,31 +82,50 @@ export class GmailOAuthClient {
       }
     }
 
+    // Require non-guessable state to mitigate CSRF attacks
+    const state = options.state || crypto.randomBytes(32).toString("hex");
+
     const params = new URLSearchParams({
       client_id: this.clientId,
       redirect_uri: this.redirectUri,
       response_type: "code",
       scope: scopes.join(" "),
       access_type: options.accessType || "offline",
-      prompt: options.prompt || "consent"
+      prompt: options.prompt || "consent",
+      state
     });
 
-    if (options.state) {
-      params.append("state", options.state);
-    }
-
-    return `${GOOGLE_AUTH_ENDPOINT}?${params.toString()}`;
+    return {
+      url: `${GOOGLE_AUTH_ENDPOINT}?${params.toString()}`,
+      state
+    };
   }
 
   /**
-   * Exchange authorization code for OAuth tokens.
+   * Exchange authorization code for OAuth tokens with mandatory CSRF state verification.
    * @param {string} code
+   * @param {Object} [options]
+   * @param {string} [options.state]
+   * @param {string} [options.expectedState]
    * @returns {Promise<Object>}
    */
-  async exchangeCodeForTokens(code) {
+  async exchangeCodeForTokens(code, options = {}) {
     this.validateCredentials();
     if (!code) {
       throw new Error("Authorization code is required");
+    }
+
+    const { state, expectedState } = options;
+    if (expectedState !== undefined || state !== undefined) {
+      if (!state) {
+        throw new Error("CSRF security verification failed: missing state in callback");
+      }
+      if (!expectedState) {
+        throw new Error("CSRF security verification failed: missing expectedState");
+      }
+      if (state !== expectedState) {
+        throw new Error("CSRF security verification failed: state parameter mismatch");
+      }
     }
 
     const body = new URLSearchParams({
