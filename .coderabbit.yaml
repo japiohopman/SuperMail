@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+
+early_access: false
+enable_free_tier: true
+
+tone_instructions: >-
+  Be direct, evidence-based, and architecture-aware.
+  Report concrete correctness, security, regression, and scope risks.
+  Prefer actionable findings over style nits.
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  review_status: true
+  commit_status: true
+  poem: false
+  collapse_walkthrough: true
+
+  auto_review:
+    enabled: true
+    drafts: true
+    auto_incremental_review: true
+
+  pre_merge_checks:
+    mode: "error"
+
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        Review against AGENTS.md, docs/AGENT.md, docs/ARCHITECTURE.md,
+        docs/SECURITY.md, docs/DISPATCH.md, and docs/AI-REVIEW-RELAY.md.
+
+        SuperMail is an agentic development system. Treat dispatcher state,
+        claim/session identity, dependency ordering, reviewer trust, and
+        merge-gate behavior as high-value control-plane logic.
+
+        Verify the linked GitHub issue acceptance criteria. Flag scope expansion,
+        duplicated sources of truth, nondeterministic control-plane behavior,
+        race conditions, stale-state handling, unsafe retries, and missing tests.
+
+        Never treat CI success alone as architectural approval.
+        Never request execution of untrusted pull-request code merely to inspect it.
+
+        For Gmail-related changes, scrutinize OAuth scopes, state validation,
+        token handling, mailbox data boundaries, destructive actions, and
+        untrusted email content.
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - "AGENTS.md"
+      - "docs/**/*.md"
+      - "**/README.md"
+
+chat:
+  auto_reply: true

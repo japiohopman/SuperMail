@@ -16,20 +16,43 @@ Valid state transitions enforced by the dispatcher engine:
 - `approved` -> `merged`, `changes-requested`
 - `merged` -> terminal state
 
-## Claim identity
+## Core Invariants
 
-Every implementation session has a stable claim identity formatted as:
-`jules-<timestamp>-<issueNumber>-<nonce>`
+1. **Strict Claim Invariant:**
+   `claimIssue()` may claim an issue **only** when its current status is strictly `"roadmap-ready"`. Attempting to claim an issue in any other state (e.g., `claimed`, `in-progress`, `PR`, `merged`) is strictly rejected, regardless of whether a claim object exists.
 
-The dispatcher engine prevents duplicate claims by checking if an issue is already claimed or in-progress. If an active claim exists on an issue, attempts by another worker to claim the same issue fail immediately.
+2. **Strict State/Claim Invariant:**
+   `"roadmap-ready"` (and `"merged"`) must **never** coexist with an active claim or session. Any release, reset, or transition back to `"roadmap-ready"` clears the issue claim and associated session atomically.
 
-## State persistence format
+3. **Register Safety:**
+   `registerIssue()` validates existing state transitions and prevents registering or updating an issue into an impossible or corrupt state/claim combination.
 
-Dispatcher state is stored in a single explicit repository state file (e.g. `.github/dispatcher-state.json` or custom path). The schema is structured as follows:
+4. **No Ambient Randomness:**
+   Dispatcher control-plane identifiers (nonces, temporary filenames, unique tags) use cryptographic primitives (`crypto.randomBytes()`) rather than pseudo-random functions like `Math.random()`.
+
+## Persistence Adapter Boundary & Concurrency Control
+
+### Persistence Boundaries
+Local JSON file state on a GitHub Actions runner is an ephemeral execution artifact, **not** durable shared orchestration state across isolated workflow invocations or independent runner environments.
+
+To maintain clean separation of concerns:
+- **`DispatcherEngine`**: Pure state machine and lifecycle invariant engine.
+- **`PersistenceAdapter`**: Abstract storage contract defining `load()` and `save(state, expectedRevision)`.
+- **`FilePersistenceAdapter`**: Default local file persistence adapter with Compare-And-Swap (CAS) revision checking.
+- **`MemoryPersistenceAdapter`**: In-memory adapter with CAS revision checking for testing and process-isolated workflows.
+- **Shared Orchestration Layer (#6)**: Future persistent adapter providing cross-runner durability (e.g., GitHub State API / issue store / central store).
+
+### Concurrency Guarantees (CAS / Optimistic Locking)
+Every state modification increments an explicit integer `revision`. Persistence adapters enforce Compare-And-Swap (CAS):
+- When saving, the adapter checks whether the current store revision matches the expected revision loaded before the modification.
+- If two processes attempt concurrent claims or state transitions on the same initial revision, the second write fails with a CAS conflict (`CAS conflict: expected revision X, but current is Y`).
+
+## State schema format
 
 ```json
 {
   "version": "1.0.0",
+  "revision": 1,
   "updatedAt": "2025-01-01T00:00:00.000Z",
   "issues": {
     "3": {
@@ -52,8 +75,8 @@ Dispatcher state is stored in a single explicit repository state file (e.g. `.gi
       ],
       "status": "claimed",
       "claim": {
-        "claimId": "jules-1700000000000-3-worker1",
-        "sessionId": "session-worker1",
+        "claimId": "jules-1700000000000-3-a1b2c3d4",
+        "sessionId": "session-a1b2c3d4",
         "claimedAt": "2025-01-01T00:00:00.000Z",
         "expiresAt": "2025-01-01T01:00:00.000Z",
         "lastHeartbeat": "2025-01-01T00:00:00.000Z"
@@ -61,8 +84,8 @@ Dispatcher state is stored in a single explicit repository state file (e.g. `.gi
     }
   },
   "sessions": {
-    "jules-1700000000000-3-worker1": {
-      "claimId": "jules-1700000000000-3-worker1",
+    "jules-1700000000000-3-a1b2c3d4": {
+      "claimId": "jules-1700000000000-3-a1b2c3d4",
       "issueId": "3",
       "status": "claimed",
       "createdAt": "2025-01-01T00:00:00.000Z",
@@ -74,8 +97,6 @@ Dispatcher state is stored in a single explicit repository state file (e.g. `.gi
   }
 }
 ```
-
-Because state is saved to disk atomically, a process restart or crash reloads per-session state and prevents silent duplication of work.
 
 ## Dependency ordering rules
 
@@ -97,18 +118,15 @@ The dispatcher generates a deterministic handoff packet containing:
 
 ## Operational recovery for stuck sessions
 
-If a Jules runner process crashes, hangs, or encounters an unrecoverable failure:
-
 1. **Automatic Lease Expiration:**
-   - Every claim is issued with a lease duration (default: 1 hour).
-   - Upon claiming or recovering state, `recoverStaleClaims()` automatically identifies claims where `currentTime > expiresAt`, marks the session as `stale-recovered`, and resets the issue status back to `roadmap-ready`.
+   - Claims are issued with a lease duration (default: 1 hour).
+   - `recoverStaleClaims()` automatically identifies expired claims (`now > expiresAt`), updates session status to `stale-recovered`, and resets the issue status back to `roadmap-ready` while clearing `issue.claim`.
 
 2. **Manual Session Release / Reset:**
-   - Call `engine.releaseClaim(claimId, "manual operational recovery")` in Node or dispatcher CLI.
-   - This sets the corresponding issue back to `roadmap-ready`, clears `issue.claim`, and records the release reason in session status.
+   - Calling `engine.releaseClaim(claimId, "operational recovery")` sets the issue back to `roadmap-ready` and atomically clears `issue.claim`.
 
 3. **Session Re-claiming:**
-   - Once an issue is reset to `roadmap-ready`, a new dispatcher instance or session can safely claim the issue with a new stable `claimId`.
+   - Once reset to `roadmap-ready`, the issue can be safely claimed by a new session.
 
 ## Review identity
 
