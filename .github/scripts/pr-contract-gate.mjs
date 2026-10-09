@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const REQUIRED_SECTIONS = [
   "## Change",
@@ -82,6 +84,7 @@ export function validatePrContract(input) {
   }
 
   const verification = getSection(body, "## Verification");
+  const verifiedCiRunIds = new Set((input.verifiedCiRunIds ?? []).map(String));
   for (const command of REQUIRED_COMMANDS) {
     const commandLine = verification.split("\n").find((line) => line.includes(command));
     if (!commandLine || !/\b(pass(?:ed)?|success(?:ful)?)\b/i.test(commandLine)) {
@@ -90,6 +93,10 @@ export function validatePrContract(input) {
     }
     if (!commandLine.includes(String(input.headSha ?? ""))) {
       errors.push(`Verification line for ${command} must include the exact current head SHA.`);
+    }
+    const citedRunId = commandLine.match(/actions\\/runs\\/(\\d+)/)?.[1];
+    if (!citedRunId || !verifiedCiRunIds.has(citedRunId)) {
+      errors.push(`Verification line for ${command} must link to a successful CI run on the current head SHA.`);
     }
   }
   if (!/https:\/\/github\.com\/[^\s)]+\/actions\/runs\/\d+/i.test(verification)) {
@@ -121,6 +128,9 @@ export function validatePrContract(input) {
     errors.push("Safety must state the security/privacy impact and confirm whether sensitive data or permissions changed.");
   }
 
+  if (input.noOpInspectionFailed === true) {
+    errors.push("Unable to verify whether the latest commit changes the repository tree.");
+  }
   if (input.lastCommitTreeIdenticalToParent === true) {
     errors.push("The latest commit has the same tree as its parent (no-op commit). Do not present it as implementation progress.");
   }
@@ -162,4 +172,4 @@ function main() {
   process.exitCode = 1;
 }
 
-if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main();
