@@ -144,37 +144,28 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
 
     while (Date.now() - start < this.lockTimeoutMs) {
       try {
-        // Publish a complete token atomically, so a paused writer cannot look stale.
-        const candidatePath = `${this.lockPath}.${ownerToken.replace(":", ".")}`;
-        fs.writeFileSync(candidatePath, ownerToken, { flag: "wx" });
-        try {
-          fs.linkSync(candidatePath, this.lockPath);
-        } finally {
-          fs.unlinkSync(candidatePath);
-        }
+        const fd = fs.openSync(this.lockPath, "wx");
+        fs.writeSync(fd, ownerToken);
+        fs.closeSync(fd);
         this._currentOwnerToken = ownerToken;
         return;
       } catch (err) {
         if (err.code === "EEXIST") {
           try {
-            // Serialize stale checks and renames. A rename alone could move a
-            // replacement lock installed by another contender after our check.
-            const takeoverPath = `${this.lockPath}.takeover`;
-            fs.mkdirSync(takeoverPath);
-            try {
-              const stat = fs.statSync(this.lockPath);
-              const content = fs.readFileSync(this.lockPath, "utf8").trim();
-              const lockPid = parseInt(content.split(":")[0], 10);
+            const stat = fs.statSync(this.lockPath);
+            const content = fs.existsSync(this.lockPath) ? fs.readFileSync(this.lockPath, "utf8").trim() : "";
+            const lockPid = parseInt(content.split(":")[0], 10);
 
-              // Stale takeover condition: lock file mtime > 10s AND owner process is dead
-              if (Date.now() - stat.mtimeMs > 10000 && (!lockPid || !this.isPidAlive(lockPid))) {
-                const stalePath = `${this.lockPath}.stale.${crypto.randomBytes(16).toString("hex")}`;
+            // Stale takeover condition: lock file mtime > 10s AND owner process is dead
+            if (Date.now() - stat.mtimeMs > 10000 && (!lockPid || !this.isPidAlive(lockPid))) {
+              const stalePath = `${this.lockPath}.stale.${Date.now()}.${crypto.randomBytes(4).toString("hex")}`;
+              try {
                 fs.renameSync(this.lockPath, stalePath);
                 fs.unlinkSync(stalePath);
-                continue;
+              } catch {
+                // Ignore if rename/unlink failed due to concurrent activity
               }
-            } finally {
-              fs.rmdirSync(takeoverPath);
+              continue;
             }
           } catch {
             // Lockfile might have been deleted/renamed concurrently

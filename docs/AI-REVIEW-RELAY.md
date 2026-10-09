@@ -2,13 +2,13 @@
 
 ## Purpose
 
-The repository prepares every non-draft PR for automated AI review. The GitHub workflow signals review readiness by adding the `ai-review` label and posting a PR comment that includes the current head SHA. Starting the review lifecycle is the responsibility of the reviewer integration that implements it.
+The repository prepares every non-draft PR for automated AI review. The GitHub workflow is the handoff layer: it identifies the PR, records the exact head SHA, and starts the provider-neutral review lifecycle.
 
 ## Active Reviewer & Relay Boundary
 
 **CodeRabbit is the active automated reviewer for SuperMail pull requests.**
 
-CodeRabbit automatic reviews are configured in `.coderabbit.yaml` and exclude draft pull requests.
+The workflow triggers automated review requests via CodeRabbit for pull requests. The repository configuration lives in `.coderabbit.yaml`.
 
 The relay acts as a control-plane boundary:
 1. Every review is keyed by `repository + pull_request + head_sha`.
