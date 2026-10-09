@@ -73,7 +73,7 @@ jobs:
               per_page: 100,
             });
 
-            const governingIssueMatch = (pr.body ?? "").match(/^\\s*-\\s*\\*\\*Governing issue:\\*\\*\\s*#?(\\d+)\\s*$/im);
+            const governingIssueMatch = (pr.body ?? "").match(/^\s*-\s*\*\*Governing issue:\*\*\s*#?(\d+)\s*$/im);
             let governingIssueIsValid = false;
             if (governingIssueMatch) {
               try {
