@@ -87,7 +87,24 @@ jobs:
                 });
                 const run = response.data;
                 if (run.name === "CI" && run.conclusion === "success" && run.head_sha === pr.head.sha) {
-                  verifiedCiRunIds.push(String(run.id));
+                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                    owner,
+                    repo,
+                    run_id: Number(runId),
+                    per_page: 100,
+                  });
+                  const stepResults = new Map();
+                  for (const job of jobs) {
+                    for (const step of job.steps ?? []) {
+                      stepResults.set(step.name, step.conclusion);
+                    }
+                  }
+                  const requiredSteps = ["Run tests", "Lint", "Typecheck", "Build"];
+                  if (requiredSteps.every(name => stepResults.get(name) === "success")) {
+                    verifiedCiRunIds.push(String(run.id));
+                  } else {
+                    core.info("CI run " + runId + " did not successfully execute every required verification step.");
+                  }
                 }
               } catch (error) {
                 core.info("Ignoring unavailable/unverified CI run " + runId + ": " + error.message);
