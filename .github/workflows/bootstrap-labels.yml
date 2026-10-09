@@ -12,11 +12,10 @@ permissions:
 jobs:
   labels:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
     steps:
       - name: Ensure SuperMail labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh label create roadmap-ready --color 1d76db --description "Issue is ready for dependency-aware dispatch" --force
           gh label create claimed --color 7057ff --description "Issue has an active dispatcher claim" --force
