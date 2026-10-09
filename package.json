@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "lint": "node --check src/index.mjs && node --check .github/supermail-dispatcher.mjs",
-    "typecheck": "node --check src/index.mjs && node --check .github/supermail-dispatcher.mjs",
-    "build": "node --check src/index.mjs && node --check .github/supermail-dispatcher.mjs"
+    "lint": "node --check src/index.mjs && node --check .github/supermail-dispatcher.mjs && node --check .github/scripts/pr-contract-gate.mjs",
+    "typecheck": "node --check src/index.mjs && node --check .github/supermail-dispatcher.mjs && node --check .github/scripts/pr-contract-gate.mjs",
+    "build": "node --check src/index.mjs && node --check .github/supermail-dispatcher.mjs && node --check .github/scripts/pr-contract-gate.mjs"
   },
   "engines": {
     "node": ">=22"

@@ -1,0 +1,194 @@
+name: PR Contract Gate
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review, converted_to_draft]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  pr-contract:
+    if: >-
+      (github.event_name == 'pull_request_target' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      # IMPORTANT: pull_request_target must never check out or execute PR-head code.
+      # PR events use their trusted base SHA; workflow_run uses the trusted default branch.
+      - name: Check out trusted base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Collect contract evidence from GitHub APIs
+        uses: actions/github-script@v7
+        env:
+          PR_CONTRACT_INPUT: ${{ runner.temp }}/pr-contract-input.json
+        with:
+          script: |
+            const fs = require("node:fs");
+            const { owner, repo } = context.repo;
+            let pr = context.payload.pull_request;
+
+            // A successful CI completion reruns the same gate after CI has finished.
+            if (!pr && context.eventName === "workflow_run") {
+              const linkedPull = (context.payload.workflow_run.pull_requests ?? []).find(item => item.number);
+              if (linkedPull) {
+                const response = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number: linkedPull.number,
+                });
+                pr = response.data;
+              } else {
+                // GitHub can omit workflow_run.pull_requests (notably for some
+                // forked/head-ref combinations). Resolve the open PR by exact SHA.
+                const openPulls = await github.paginate(github.rest.pulls.list, {
+                  owner,
+                  repo,
+                  state: "open",
+                  per_page: 100,
+                });
+                pr = openPulls.find(item => item.head.sha === context.payload.workflow_run.head_sha);
+              }
+            }
+
+            if (!pr || pr.draft) {
+              fs.writeFileSync(process.env.PR_CONTRACT_INPUT, JSON.stringify({
+                draft: true,
+                body: "",
+                headSha: "",
+                changedFiles: [],
+                governingIssueIsValid: false,
+                verifiedCiRuns: [],
+                mergeSha: pr?.merge_commit_sha ?? null,
+                lastCommitTreeIdenticalToParent: false,
+                noOpInspectionFailed: false,
+              }, null, 2));
+              return;
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            const governingIssueMatch = (pr.body ?? "").match(/^\s*-\s*\*\*Governing issue:\*\*\s*#?(\d+)\s*$/im);
+            let governingIssueIsValid = false;
+            if (governingIssueMatch) {
+              try {
+                const issueResponse = await github.rest.issues.get({
+                  owner,
+                  repo,
+                  issue_number: Number(governingIssueMatch[1]),
+                });
+                governingIssueIsValid = issueResponse.data.state === "open" && !issueResponse.data.pull_request;
+              } catch (error) {
+                core.info("Governing issue could not be verified: " + error.message);
+              }
+            }
+
+            // Validate every Actions run ID cited in the PR body against GitHub's
+            // API. Only a successful repository CI run for this exact head counts.
+            const citedRunIds = [...new Set(
+              [...(pr.body ?? "").matchAll(/actions\/runs\/(\d+)/g)].map(match => match[1])
+            )];
+            const verifiedCiRuns = [];
+            for (const runId of citedRunIds) {
+              try {
+                const response = await github.rest.actions.getWorkflowRun({
+                  owner,
+                  repo,
+                  run_id: Number(runId),
+                });
+                const run = response.data;
+                const testedTarget = run.head_sha === pr.head.sha
+                  ? "PR head"
+                  : (pr.merge_commit_sha && run.head_sha === pr.merge_commit_sha ? "merge commit" : null);
+                if (run.name === "CI" && run.conclusion === "success" && testedTarget) {
+                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                    owner,
+                    repo,
+                    run_id: Number(runId),
+                    per_page: 100,
+                  });
+                  const stepResults = new Map();
+                  for (const job of jobs) {
+                    for (const step of job.steps ?? []) {
+                      stepResults.set(step.name, step.conclusion);
+                    }
+                  }
+                  const requiredSteps = ["Run tests", "Lint", "Typecheck", "Build"];
+                  if (requiredSteps.every(name => stepResults.get(name) === "success")) {
+                    verifiedCiRuns.push({ id: String(run.id), sha: run.head_sha, target: testedTarget });
+                  } else {
+                    core.info("CI run " + runId + " did not successfully execute every required verification step.");
+                  }
+                }
+              } catch (error) {
+                core.info("Ignoring unavailable/unverified CI run " + runId + ": " + error.message);
+              }
+            }
+
+            // Inspect PR commit metadata via the Pull Requests API so this also
+            // works when the head branch lives in a fork. Never fetch or execute code.
+            let lastCommitTreeIdenticalToParent = false;
+            let noOpInspectionFailed = false;
+            try {
+              const commits = await github.paginate(github.rest.pulls.listCommits, {
+                owner,
+                repo,
+                pull_number: pr.number,
+                per_page: 100,
+              });
+              const headCommit = commits.find(commit => commit.sha === pr.head.sha) ?? commits[commits.length - 1];
+              if (!headCommit || headCommit.sha !== pr.head.sha) {
+                throw new Error("The current PR head commit was not returned by the Pull Requests API");
+              }
+              const parents = headCommit.parents ?? [];
+              if (parents.length === 1) {
+                let parentCommit = commits.find(commit => commit.sha === parents[0].sha);
+                if (!parentCommit) {
+                  const parentResponse = await github.rest.repos.getCommit({
+                    owner,
+                    repo,
+                    ref: parents[0].sha,
+                  });
+                  parentCommit = parentResponse.data;
+                }
+                const headTree = headCommit.commit?.tree?.sha;
+                const parentTree = parentCommit.commit?.tree?.sha;
+                if (!headTree || !parentTree) {
+                  throw new Error("The head or parent tree SHA is unavailable");
+                }
+                lastCommitTreeIdenticalToParent = headTree === parentTree;
+              }
+            } catch (error) {
+              noOpInspectionFailed = true;
+              core.warning("Unable to inspect the head commit tree: " + error.message);
+            }
+
+            fs.writeFileSync(process.env.PR_CONTRACT_INPUT, JSON.stringify({
+              body: pr.body ?? "",
+              draft: pr.draft,
+              headSha: pr.head.sha,
+              changedFiles: files.map(file => file.filename),
+              governingIssueIsValid,
+              verifiedCiRuns,
+              mergeSha: pr.merge_commit_sha ?? null,
+              lastCommitTreeIdenticalToParent,
+              noOpInspectionFailed,
+            }, null, 2));
+
+      - name: Enforce status, acceptance criteria, and current-head CI
+        run: node .github/scripts/pr-contract-gate.mjs "$RUNNER_TEMP/pr-contract-input.json"
