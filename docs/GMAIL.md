@@ -12,6 +12,8 @@ Implement authorization, thread/message/label retrieval, incremental synchroniza
 
 Use Gmail push/watch mechanisms where appropriate, backed by history synchronization and reconciliation. A notification is only a signal to synchronize.
 
+See [GMAIL_SYNC.md](GMAIL_SYNC.md) for detailed documentation on deterministic synchronization, history cursor management, and automated reconciliation recovery.
+
 ## Phase 4 — Write path
 
 Build drafts before autonomous sending. Add narrowly scoped outbound operations only after policy, idempotency, audit, and failure handling exist.
