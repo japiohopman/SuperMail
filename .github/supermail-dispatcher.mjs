@@ -123,6 +123,16 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
     this._currentOwnerToken = null;
   }
 
+  isPidAlive(pid) {
+    if (!pid || isNaN(pid)) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return err.code === "EPERM";
+    }
+  }
+
   async acquireLock() {
     const start = Date.now();
     const dir = path.dirname(this.lockPath);
@@ -141,16 +151,19 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
         return;
       } catch (err) {
         if (err.code === "EEXIST") {
-          // Check for stale lockfile (>10 seconds old)
           try {
             const stat = fs.statSync(this.lockPath);
-            if (Date.now() - stat.mtimeMs > 10000) {
+            const content = fs.existsSync(this.lockPath) ? fs.readFileSync(this.lockPath, "utf8").trim() : "";
+            const lockPid = parseInt(content.split(":")[0], 10);
+
+            // Stale takeover condition: lock file mtime > 10s AND owner process is dead
+            if (Date.now() - stat.mtimeMs > 10000 && (!lockPid || !this.isPidAlive(lockPid))) {
               const stalePath = `${this.lockPath}.stale.${Date.now()}.${crypto.randomBytes(4).toString("hex")}`;
               try {
                 fs.renameSync(this.lockPath, stalePath);
                 fs.unlinkSync(stalePath);
               } catch {
-                // Ignore if rename or unlink failed due to concurrent lock activity
+                // Ignore if rename/unlink failed due to concurrent activity
               }
               continue;
             }
@@ -540,10 +553,11 @@ export class DispatcherEngine {
     });
   }
 
-  async updateStatus(issueId, newStatus, extraData = {}) {
+  async updateStatus(issueId, newStatus, options = {}) {
     return this.adapter.withLock(async () => {
       await this.sync();
       const idStr = String(issueId);
+      const nowMs = options.nowMs || Date.now();
       const issue = this.getIssue(idStr);
       if (!issue) {
         throw new Error(`Issue ${idStr} not found.`);
@@ -557,9 +571,19 @@ export class DispatcherEngine {
         throw new Error(`Invalid state transition from ${issue.status} to ${newStatus}`);
       }
 
-      // Reject transition to states requiring a claim if issue has no active claim
-      if (STATES_REQUIRING_CLAIM.includes(newStatus) && !issue.claim) {
-        throw new Error(`Cannot transition issue ${idStr} to status '${newStatus}' without an active claim.`);
+      // Claim identity verification: transitions into or through claim-owned states (including 'merged') require exact active claimId and active lease
+      if (STATES_REQUIRING_CLAIM.includes(newStatus) || newStatus === "merged") {
+        const claimId = options.claimId;
+        if (!claimId) {
+          throw new Error(`Cannot transition issue ${idStr} to status '${newStatus}' without providing 'claimId'.`);
+        }
+        if (!issue.claim || issue.claim.claimId !== claimId) {
+          throw new Error(`Cannot transition issue ${idStr}: claimId '${claimId}' does not match active claim on issue.`);
+        }
+        const expiresAtMs = new Date(issue.claim.expiresAt).getTime();
+        if (nowMs > expiresAtMs) {
+          throw new Error(`Cannot transition issue ${idStr}: claim '${claimId}' has expired.`);
+        }
       }
 
       issue.status = newStatus;
@@ -569,9 +593,9 @@ export class DispatcherEngine {
         const session = this.state.sessions[claimId];
         if (session) {
           session.status = (newStatus === "roadmap-ready" || newStatus === "merged") ? (newStatus === "roadmap-ready" ? "reset" : "completed") : newStatus;
-          session.updatedAt = new Date().toISOString();
-          if (extraData.pullRequest) session.pullRequest = extraData.pullRequest;
-          if (extraData.headSha) session.headSha = extraData.headSha;
+          session.updatedAt = new Date(nowMs).toISOString();
+          if (options.pullRequest) session.pullRequest = options.pullRequest;
+          if (options.headSha) session.headSha = options.headSha;
         }
       }
 

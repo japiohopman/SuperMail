@@ -24,27 +24,35 @@ Valid state transitions enforced by the dispatcher engine:
 2. **Strict State/Claim Invariant:**
    `"roadmap-ready"` (and `"merged"`) must **never** coexist with an active claim or session. Any release, reset, or transition back to `"roadmap-ready"` clears the issue claim and moves the associated session to a terminal/reset status (`reset`, `completed`, or `released`).
 
-3. **Register Safety:**
+3. **Claim Identity Verification on Transitions:**
+   `updateStatus()` requires the exact active `claimId` and an unexpired lease for all transitions into or through claim-owned states (`claimed`, `in-progress`, `PR`, `awaiting-review`, `changes-requested`, `approved`, `merged`). Missing, mismatched, or expired claim IDs are strictly rejected without mutating issue or session state.
+
+4. **Register Safety:**
    `registerIssue()` validates existing state transitions and prevents registering an issue in states requiring a claim (`claimed`, `in-progress`, `PR`, `awaiting-review`, `changes-requested`, `approved`) if no active claim exists.
 
-4. **No Ambient Randomness:**
+5. **No Ambient Randomness:**
    Dispatcher control-plane identifiers (nonces, temporary filenames, unique tags) use cryptographic primitives (`crypto.randomBytes()`) rather than pseudo-random functions like `Math.random()`.
 
 ## Persistence Adapter Boundary & Concurrency Control
 
-### Persistence Boundaries
-Local JSON file state on a GitHub Actions runner is an ephemeral execution artifact, **not** durable shared orchestration state across isolated workflow invocations or independent runner environments.
+### Persistence Boundaries & Multi-Runner Scope
+Local JSON file state on a GitHub Actions runner is an ephemeral execution artifact local to a single runner invocation, **not** durable shared orchestration state across independent GitHub Actions runners or workflow runs.
 
+- Automatic dispatch remains **disabled** until the shared cross-runner persistence adapter (#6) and Jules capacity/API management (#6) are implemented and verified.
+- The SuperMail runtime agent and Gmail scopes remain completely separate from the development dispatcher.
+
+### Engine and Adapter Architecture
 To maintain clean separation of concerns:
 - **`DispatcherEngine`**: Pure state machine and lifecycle invariant engine.
 - **`PersistenceAdapter`**: Abstract storage contract defining `load()`, `save(state, expectedRevision)`, and `withLock(fn)`.
-- **`FilePersistenceAdapter`**: Default local file persistence adapter with exclusive cross-process file locking (`.lock`) and Compare-And-Swap (CAS) revision checking.
+- **`FilePersistenceAdapter`**: Local file persistence adapter with process PID validation, owner tokens, exclusive cross-process file locking (`.lock`), and Compare-And-Swap (CAS) revision checking.
 - **`MemoryPersistenceAdapter`**: In-memory adapter with in-process locking and CAS revision checking for testing and process-isolated workflows.
 - **Shared Orchestration Layer (#6)**: Future persistent adapter providing cross-runner durability (e.g., GitHub State API / issue store / central store).
 
 ### Concurrency Guarantees (Cross-Process Locking + CAS)
-1. **Exclusive Lock Execution:** File operations (`load` + modification + `save`) acquire a process-exclusive `.lock` file to prevent concurrent read/modify/write race conditions across local processes.
-2. **CAS / Revision Checking:** Every state modification increments an explicit integer `revision`. When saving, the adapter verifies whether the store revision matches the expected revision loaded before the modification, failing with a CAS conflict (`CAS conflict: expected version X, but current is Y`) if modified concurrently.
+1. **Exclusive Lock Execution:** File operations (`load` + modification + `save`) acquire a process-exclusive `.lock` file written with an owner token (`PID:ownerTag`). Stale locks (>10s) are stolen only if the owner PID is verified dead (`process.kill(pid, 0)`).
+2. **Safe Lock Release:** On lock release, the adapter checks that `.lock` still contains its process owner token before unlinking, preventing stale owners from removing replacement owners' locks.
+3. **CAS / Revision Checking:** Every state modification increments an explicit integer `revision`. When saving, the adapter verifies whether the store revision matches the expected revision loaded before the modification, failing with a CAS conflict (`CAS conflict: expected file revision X, but current file revision is Y`) if modified concurrently.
 
 ## State schema format
 
@@ -122,7 +130,7 @@ The dispatcher generates a deterministic handoff packet containing:
    - `recoverStaleClaims()` automatically identifies expired claims (`now > expiresAt`), updates session status to `stale-recovered`, and resets the issue status back to `roadmap-ready` while clearing `issue.claim`.
 
 2. **Manual Session Release / Reset:**
-   - Calling `engine.releaseClaim(claimId, "operational recovery")` sets the issue back to `roadmap-ready`, updates session status to `released: operational recovery`, and atomically clears `issue.claim`.
+   - Calling `engine.releaseClaim(claimId, "operational recovery")` verifies matching `claimId`, sets the issue back to `roadmap-ready`, updates session status to `released: operational recovery`, and atomically clears `issue.claim`.
 
 3. **Session Re-claiming:**
    - Once reset to `roadmap-ready`, the issue can be safely claimed by a new session.
