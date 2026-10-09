@@ -12,7 +12,7 @@ The gate skips Draft PRs so incomplete work can be shared safely. A non-draft PR
 
 ## What the gate verifies
 
-1. All required PR sections are present, including Safety and the latest reviewer instruction.
+1. All required PR sections are present, including Safety and the latest reviewer instruction. The PR must identify an existing open governing issue; closed issues and pull requests are rejected as governing references.
 2. The status is `READY FOR REVIEW`, and the reported 40-character head SHA matches the live PR head.
 3. Every file reported by the GitHub Pull Requests API appears in the PR body's changed-file list.
 4. Acceptance criteria use explicit checkboxes and none remain unchecked.
