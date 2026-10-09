@@ -114,6 +114,60 @@ test("updateStatus safety: rejecting claim-owned transition without valid, non-e
   assert.equal(engine.getIssue("99").status, "in-progress");
 });
 
+test("heartbeatClaim safety: rejecting expired leases and recovering claim atomically", async () => {
+  const filePath = getTempStateFilePath();
+  const engine = new DispatcherEngine({ filePath, leaseDurationMs: 1000 });
+  await engine.init();
+
+  await engine.registerIssue({ issueId: "50", status: "roadmap-ready" });
+  const now = Date.now();
+  const { claimId } = await engine.claimIssue("50", { nonce: "hb-worker", nowMs: now });
+
+  // Extend lease before expiration succeeds
+  await engine.heartbeatClaim(claimId, { nowMs: now + 500, leaseDurationMs: 1000 });
+  assert.equal(engine.getIssue("50").status, "claimed");
+
+  // Attempt to extend lease AFTER expiration fails, recovers claim to roadmap-ready, and persists recovery
+  await assert.rejects(
+    async () => { await engine.heartbeatClaim(claimId, { nowMs: now + 2000 }); },
+    /lease has expired/
+  );
+
+  // Verify another engine instance reads recovered state from disk
+  const engine2 = new DispatcherEngine({ filePath });
+  await engine2.init();
+  assert.equal(engine2.getIssue("50").status, "roadmap-ready");
+  assert.equal(engine2.getIssue("50").claim, null);
+  assert.equal(engine2.getSession(claimId).status, "stale-recovered");
+});
+
+test("claimIssue persists stale recovery even when prerequisite checks fail", async () => {
+  const filePath = getTempStateFilePath();
+  const engine = new DispatcherEngine({ filePath, leaseDurationMs: 1000 });
+  await engine.init();
+
+  await engine.registerIssue({ issueId: "1", status: "roadmap-ready" });
+  const now = Date.now();
+  const { claimId: claim1Id } = await engine.claimIssue("1", { nonce: "worker-1", nowMs: now });
+
+  // Issue 2 depends on unmerged Issue 1
+  await engine.registerIssue({ issueId: "2", prerequisites: ["1"], status: "roadmap-ready" });
+
+  // Call claimIssue for Issue 2 at now + 2000ms.
+  // Issue 1's claim has expired. claimIssue recovers Issue 1, persists recovery, then fails on Issue 2 prereqs.
+  await assert.rejects(
+    async () => { await engine.claimIssue("2", { nonce: "worker-2", nowMs: now + 2000 }); },
+    /Prerequisite issues not merged: 1/
+  );
+
+  // Verify another engine reads recovered Issue 1 from disk
+  const engine2 = new DispatcherEngine({ filePath });
+  await engine2.init();
+  assert.equal(engine2.getIssue("1").status, "roadmap-ready");
+  assert.equal(engine2.getIssue("1").claim, null);
+  assert.equal(engine2.getSession(claim1Id).status, "stale-recovered");
+});
+
 test("strict state/claim invariant: roadmap-ready status cannot retain active claim or session", async () => {
   const filePath = getTempStateFilePath();
   const engine = new DispatcherEngine({ filePath });
@@ -244,55 +298,73 @@ test("stale claim recovery", async () => {
   assert.equal(engine.getIssue("3").status, "claimed");
 });
 
-test("real multi-process concurrent claim race: exactly one process succeeds", async () => {
+test("real multi-process concurrent claim race: failure-safe child process test", async () => {
   const filePath = getTempStateFilePath();
-
-  // Setup initial issue state
-  const initEngine = new DispatcherEngine({ filePath });
-  await initEngine.init();
-  await initEngine.registerIssue({ issueId: "100", status: "roadmap-ready" });
-
-  const dispatcherModulePath = path.resolve(process.cwd(), ".github/supermail-dispatcher.mjs");
-
-  // Child process script
-  const childScript = `
-    import { DispatcherEngine } from ${JSON.stringify(dispatcherModulePath)};
-    const filePath = process.argv[2];
-    const nonce = process.argv[3];
-    async function run() {
-      try {
-        const engine = new DispatcherEngine({ filePath });
-        await engine.init();
-        const res = await engine.claimIssue('100', { nonce });
-        process.send({ success: true, claimId: res.claimId });
-      } catch (err) {
-        process.send({ success: false, error: err.message });
-      }
-    }
-    run();
-  `;
-
   const tmpScript = path.join(path.dirname(filePath), "child-runner.mjs");
-  fs.writeFileSync(tmpScript, childScript, "utf8");
 
-  // Spawn 4 separate OS child processes
-  const children = Array.from({ length: 4 }, (_, i) => {
-    return new Promise((resolve) => {
-      const child = fork(tmpScript, [filePath, `proc-${i}`], { stdio: "inherit" });
-      child.on("message", (msg) => resolve(msg));
+  try {
+    // Setup initial issue state
+    const initEngine = new DispatcherEngine({ filePath });
+    await initEngine.init();
+    await initEngine.registerIssue({ issueId: "100", status: "roadmap-ready" });
+
+    const dispatcherModulePath = path.resolve(process.cwd(), ".github/supermail-dispatcher.mjs");
+
+    // Child process script
+    const childScript = `
+      import { DispatcherEngine } from ${JSON.stringify(dispatcherModulePath)};
+      const filePath = process.argv[2];
+      const nonce = process.argv[3];
+      async function run() {
+        try {
+          const engine = new DispatcherEngine({ filePath });
+          await engine.init();
+          const res = await engine.claimIssue('100', { nonce });
+          process.send({ success: true, claimId: res.claimId });
+        } catch (err) {
+          process.send({ success: false, error: err.message });
+        }
+      }
+      run();
+    `;
+
+    fs.writeFileSync(tmpScript, childScript, "utf8");
+
+    // Spawn 4 separate OS child processes with failure-safe promise resolution
+    const children = Array.from({ length: 4 }, (_, i) => {
+      return new Promise((resolve) => {
+        let settled = false;
+        const child = fork(tmpScript, [filePath, `proc-${i}`], { stdio: "ignore" });
+
+        const safeResolve = (data) => {
+          if (!settled) {
+            settled = true;
+            resolve(data);
+          }
+        };
+
+        child.on("message", (msg) => safeResolve(msg));
+        child.on("error", (err) => safeResolve({ success: false, error: err.message }));
+        child.on("exit", (code) => {
+          if (!settled) {
+            safeResolve({ success: false, error: `Child process exited with code ${code}` });
+          }
+        });
+      });
     });
-  });
 
-  const results = await Promise.all(children);
+    const results = await Promise.all(children);
 
-  const successes = results.filter((r) => r.success);
-  const failures = results.filter((r) => !r.success);
+    const successes = results.filter((r) => r.success);
+    const failures = results.filter((r) => !r.success);
 
-  assert.equal(successes.length, 1);
-  assert.equal(failures.length, 3);
-
-  // Clean up script
-  if (fs.existsSync(tmpScript)) fs.unlinkSync(tmpScript);
+    assert.equal(successes.length, 1, "Exactly one process must successfully claim");
+    assert.equal(failures.length, 3, "Remaining processes must fail cleanly");
+  } finally {
+    if (fs.existsSync(tmpScript)) fs.unlinkSync(tmpScript);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    if (fs.existsSync(`${filePath}.lock`)) fs.unlinkSync(`${filePath}.lock`);
+  }
 });
 
 test("FilePersistenceAdapter handles malformed state JSON by throwing syntax error", async () => {

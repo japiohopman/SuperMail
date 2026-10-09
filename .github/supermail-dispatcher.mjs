@@ -440,6 +440,7 @@ export class DispatcherEngine {
       const recovered = this.recoverStaleClaims(nowMs);
       if (recovered.length > 0) {
         this.normalizeInvariants();
+        await this.save();
       }
 
       const issue = this.getIssue(idStr);
@@ -509,6 +510,18 @@ export class DispatcherEngine {
       const issue = this.getIssue(session.issueId);
       if (!issue || !issue.claim || issue.claim.claimId !== claimId) {
         throw new Error(`Active claim for claimId ${claimId} not found on issue ${session.issueId}.`);
+      }
+
+      // Check if active lease has already expired
+      const existingExpiresAtMs = new Date(issue.claim.expiresAt).getTime();
+      if (nowMs > existingExpiresAtMs) {
+        // Recover the expired claim atomically
+        issue.status = "roadmap-ready";
+        issue.claim = null;
+        session.status = "stale-recovered";
+        session.updatedAt = new Date(nowMs).toISOString();
+        await this.save();
+        throw new Error(`Cannot extend lease for claim ${claimId}: lease has expired.`);
       }
 
       const leaseDuration = options.leaseDurationMs || this.leaseDurationMs;
