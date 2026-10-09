@@ -18,6 +18,8 @@ Build a secure autonomous Gmail secretary without turning the mailbox into an un
 - Jules must keep the PR body current as a live status report; see `docs/AGENT.md` for the required communication protocol.
 - If blocked, uncertain, or at a technical dead end, Jules must explain the attempted approach, observed evidence/error, impact, alternatives, and the specific decision or help needed. Never substitute empty/no-op commits for progress.
 - Every validation result must be tied to the exact commit SHA being reported; a green CI run on an older or unchanged head is not proof that new work is validated.
+- A non-draft PR must satisfy `.github/workflows/pr-contract-gate.yml`; keep incomplete work in Draft and update the PR body to match the current head before requesting review.
+- The PR contract gate is a development-plane status/evidence check only. It must never check out or execute PR-head code, approve a review, merge a PR, or dispatch Jules.
 - ChatGPT reviews completed PRs against issue, architecture, security, tests, and regression risk.
 - Human review is an escalation path for exceptional/high-impact cases, not the normal PR gate.
 
