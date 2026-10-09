@@ -323,6 +323,7 @@ test("stale claim recovery", async () => {
 test("real multi-process concurrent claim race: failure-safe child process test", async () => {
   const filePath = getTempStateFilePath();
   const tmpScript = path.join(path.dirname(filePath), "child-runner.mjs");
+  const childProcesses = [];
 
   try {
     // Setup initial issue state
