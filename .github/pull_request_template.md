@@ -18,7 +18,7 @@
 
 ## Verification
 
-- [ ] npm test — pending; replace with pass/fail, exact current head SHA, and a successful CI run URL.
+- [ ] npm test — pending; replace with pass/fail, `tested SHA: <full SHA> (PR head|merge commit)`, and a successful CI run URL.
 - [ ] npm run lint — pending; replace with pass/fail, exact current head SHA, and a successful CI run URL.
 - [ ] npm run typecheck — pending; replace with pass/fail, exact current head SHA, and a successful CI run URL.
 - [ ] npm run build — pending; replace with pass/fail, exact current head SHA, and a successful CI run URL.
