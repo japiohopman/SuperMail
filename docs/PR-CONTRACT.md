@@ -16,7 +16,7 @@ The gate skips Draft PRs so incomplete work can be shared safely. A non-draft PR
 2. The status is `READY FOR REVIEW`, and the reported 40-character head SHA matches the live PR head.
 3. Every file reported by the GitHub Pull Requests API appears in the PR body's changed-file list.
 4. Acceptance criteria use explicit checkboxes and none remain unchecked.
-5. `npm test`, `npm run lint`, `npm run typecheck`, and `npm run build` are reported as passed, each tied to the live head SHA and a successful `CI` Actions run verified through GitHub's API. The run ID is fetched from the current repository and must report both `conclusion: success` and the exact live `head_sha`.
+5. `npm test`, `npm run lint`, `npm run typecheck`, and `npm run build` are reported as passed, each tied to the live head SHA and a successful `CI` Actions run verified through GitHub's API. The run ID is fetched from the current repository and must report both `conclusion: success` and the exact live `head_sha`. Its jobs must also show the repository CI steps `Run tests`, `Lint`, `Typecheck`, and `Build` as successful.
 6. Blockers are explicitly declared absent or documented with the required evidence/decision fields.
 7. The latest reviewer instruction states required changes, verification required, do-not-change boundaries, and the completion signal.
 8. The head commit's tree is not identical to its parent. If GitHub API metadata cannot establish this safely, the gate fails closed.
