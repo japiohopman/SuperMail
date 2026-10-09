@@ -1,0 +1,68 @@
+name: PR Contract Gate
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review, converted_to_draft]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-contract:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      # IMPORTANT: pull_request_target must never check out or execute PR-head code.
+      # This checkout is pinned to the trusted base commit from the event payload.
+      - name: Check out trusted base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Set up pull request contract input
+        uses: actions/github-script@v7
+        env:
+          PR_CONTRACT_INPUT: ${{ runner.temp }}/pr-contract-input.json
+        with:
+          script: |
+            const fs = require("node:fs");
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const changedFiles = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            let lastCommitTreeIdenticalToParent = false;
+            const headCommit = await github.rest.repos.getCommit({
+              owner,
+              repo,
+              ref: pr.head.sha,
+            });
+            const parents = headCommit.data.parents ?? [];
+            // Only call a single-parent commit a no-op when its tree matches its
+            // parent's tree. Merge commits are deliberately not classified here.
+            if (parents.length === 1) {
+              const parentCommit = await github.rest.repos.getCommit({
+                owner,
+                repo,
+                ref: parents[0].sha,
+              });
+              lastCommitTreeIdenticalToParent =
+                headCommit.data.commit.tree.sha === parentCommit.data.commit.tree.sha;
+            }
+
+            fs.writeFileSync(process.env.PR_CONTRACT_INPUT, JSON.stringify({
+              body: pr.body ?? "",
+              draft: pr.draft,
+              headSha: pr.head.sha,
+              changedFiles: changedFiles.map(file => file.filename),
+              lastCommitTreeIdenticalToParent,
+            }, null, 2));
+
+      - name: Enforce status, evidence, and review handoff
+        run: node .github/scripts/pr-contract-gate.mjs "${{ runner.temp }}/pr-contract-input.json"
