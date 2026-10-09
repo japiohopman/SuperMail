@@ -2,13 +2,13 @@
 
 ## Purpose
 
-The repository prepares every non-draft PR for automated AI review. The GitHub Actions workflow (`.github/workflows/ai-review-handoff.yml`) acts as the trigger layer: it marks non-draft PRs with the `ai-review` label and comments with the exact head SHA to trigger CodeRabbit review requests.
+The repository prepares every non-draft PR for automated AI review. The current GitHub Actions workflow is only a review signal: it adds the `ai-review` label and comments with the exact head SHA. It does not dispatch Jules, validate a provider review, or complete the provider-neutral relay.
 
 ## Active Reviewer & Relay Boundary
 
 **CodeRabbit is the active automated reviewer for SuperMail pull requests.**
 
-The workflow triggers automated review requests via CodeRabbit for pull requests. The repository configuration lives in `.coderabbit.yaml`.
+CodeRabbit is the configured reviewer adapter. The repository configuration lives in `.coderabbit.yaml`; the handoff workflow does not itself trigger or validate a CodeRabbit review.
 
 The review boundary operates as follows:
 1. Every review is keyed by `repository + pull_request + head_sha`.
@@ -32,7 +32,7 @@ Reviews evaluate:
 - Security impact and architecture boundaries
 - Previous review state and historical feedback for the current PR head SHA
 
-Reviewers must never execute untrusted pull-request code.
+Reviewers must never execute untrusted pull-request code. A future relay must validate reviewer identity, repository, PR number, current head SHA, CI state, and linked issue before accepting review output.
 
 ## Merge Policy
 
