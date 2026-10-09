@@ -58,6 +58,7 @@ jobs:
                 body: "",
                 headSha: "",
                 changedFiles: [],
+                governingIssueIsValid: false,
                 verifiedCiRunIds: [],
                 lastCommitTreeIdenticalToParent: false,
                 noOpInspectionFailed: false,
@@ -71,6 +72,21 @@ jobs:
               pull_number: pr.number,
               per_page: 100,
             });
+
+            const governingIssueMatch = (pr.body ?? "").match(/^\\s*-\\s*\\*\\*Governing issue:\\*\\*\\s*#?(\\d+)\\s*$/im);
+            let governingIssueIsValid = false;
+            if (governingIssueMatch) {
+              try {
+                const issueResponse = await github.rest.issues.get({
+                  owner,
+                  repo,
+                  issue_number: Number(governingIssueMatch[1]),
+                });
+                governingIssueIsValid = issueResponse.data.state === "open" && !issueResponse.data.pull_request;
+              } catch (error) {
+                core.info("Governing issue could not be verified: " + error.message);
+              }
+            }
 
             // Validate every Actions run ID cited in the PR body against GitHub's
             // API. Only a successful repository CI run for this exact head counts.
@@ -151,6 +167,7 @@ jobs:
               draft: pr.draft,
               headSha: pr.head.sha,
               changedFiles: files.map(file => file.filename),
+              governingIssueIsValid,
               verifiedCiRunIds,
               lastCommitTreeIdenticalToParent,
               noOpInspectionFailed,
