@@ -93,19 +93,36 @@ export function validatePrContract(input) {
   }
 
   const verification = getSection(body, "## Verification");
-  const verifiedCiRunIds = new Set((input.verifiedCiRunIds ?? []).map(String));
+  const verifiedCiRuns = Array.isArray(input.verifiedCiRuns) ? input.verifiedCiRuns : [];
   for (const command of REQUIRED_COMMANDS) {
     const commandLine = verification.split("\n").find((line) => line.includes(command));
     if (!commandLine || !/\b(pass(?:ed)?|success(?:ful)?)\b/i.test(commandLine)) {
-      errors.push(`Verification must report ${command} as passed on the current head.`);
+      errors.push(`Verification must report ${command} as passed.`);
       continue;
     }
-    if (!commandLine.includes(String(input.headSha ?? ""))) {
-      errors.push(`Verification line for ${command} must include the exact current head SHA.`);
+
+    const tested = commandLine.match(/tested SHA:\\s*([a-f0-9]{40})\\s*\\((PR head|merge commit)\\)/i);
+    if (!tested) {
+      errors.push(`Verification line for ${command} must state the 40-character tested SHA and whether it is the PR head or merge commit.`);
+      continue;
     }
-    const citedRunId = commandLine.match(/actions\/runs\/(\d+)/)?.[1];
-    if (!citedRunId || !verifiedCiRunIds.has(citedRunId)) {
-      errors.push(`Verification line for ${command} must link to a successful CI run on the current head SHA.`);
+    const testedSha = tested[1].toLowerCase();
+    const target = tested[2].toLowerCase();
+    if (target === "pr head" && testedSha !== String(input.headSha ?? "").toLowerCase()) {
+      errors.push(`Verification for ${command} labels a SHA as PR head, but it does not match the live PR head.`);
+    }
+    if (target === "merge commit" && testedSha !== String(input.mergeSha ?? "").toLowerCase()) {
+      errors.push(`Verification for ${command} labels a SHA as merge commit, but it does not match the live PR merge commit.`);
+    }
+
+    const citedRunId = commandLine.match(/actions\\/runs\\/(\\d+)/)?.[1];
+    const matchingRun = verifiedCiRuns.find((run) =>
+      String(run.id) === String(citedRunId) &&
+      String(run.sha).toLowerCase() === testedSha &&
+      String(run.target).toLowerCase() === target
+    );
+    if (!citedRunId || !matchingRun) {
+      errors.push(`Verification line for ${command} must link to a successful CI run whose tested SHA and target were verified through GitHub's API.`);
     }
   }
   if (!/https:\/\/github\.com\/[^\s)]+\/actions\/runs\/\d+/i.test(verification)) {
