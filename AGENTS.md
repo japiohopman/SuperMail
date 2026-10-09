@@ -15,6 +15,9 @@ Build a secure autonomous Gmail secretary without turning the mailbox into an un
 - Do not delete or permanently purge mail by default.
 - Tests use fixtures or mocks, never a live mailbox.
 - Jules implements scoped issues and must not silently expand scope.
+- Jules must keep the PR body current as a live status report; see `docs/AGENT.md` for the required communication protocol.
+- If blocked, uncertain, or at a technical dead end, Jules must explain the attempted approach, observed evidence/error, impact, alternatives, and the specific decision or help needed. Never substitute empty/no-op commits for progress.
+- Every validation result must be tied to the exact commit SHA being reported; a green CI run on an older or unchanged head is not proof that new work is validated.
 - ChatGPT reviews completed PRs against issue, architecture, security, tests, and regression risk.
 - Human review is an escalation path for exceptional/high-impact cases, not the normal PR gate.
 
@@ -26,4 +29,4 @@ roadmap-ready -> claimed -> Jules -> PR -> CI -> AI review -> approved/request c
 The SuperMail runtime agent is separate from development agents. Runtime mailbox permissions must never be inherited from GitHub development credentials.
 
 ## Definition of done
-Acceptance criteria met; relevant tests pass; CI green; security impact documented; AI review passed; no unresolved review request remains.
+Acceptance criteria met; relevant tests pass; CI green on the exact reviewed head; security impact documented; PR body reports implementation and validation truthfully; AI review passed; no unresolved review request remains.
