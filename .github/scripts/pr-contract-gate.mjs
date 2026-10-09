@@ -94,7 +94,7 @@ export function validatePrContract(input) {
     if (!commandLine.includes(String(input.headSha ?? ""))) {
       errors.push(`Verification line for ${command} must include the exact current head SHA.`);
     }
-    const citedRunId = commandLine.match(/actions\\/runs\\/(\\d+)/)?.[1];
+    const citedRunId = commandLine.match(/actions\/runs\/(\d+)/)?.[1];
     if (!citedRunId || !verifiedCiRunIds.has(citedRunId)) {
       errors.push(`Verification line for ${command} must link to a successful CI run on the current head SHA.`);
     }
