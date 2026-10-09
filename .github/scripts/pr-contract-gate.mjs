@@ -45,7 +45,7 @@ export function validatePrContract(input) {
   }
 
   const governingIssueField = getField(body, "Governing issue");
-  const governingIssueMatch = governingIssueField.match(/^#?(\\d+)\\s*$/);
+  const governingIssueMatch = governingIssueField.match(/^#?(\d+)\s*$/);
   if (!governingIssueMatch) {
     errors.push("Governing issue must be the number of an existing open issue, not a PR.");
   } else if (input.governingIssueIsValid !== true) {
