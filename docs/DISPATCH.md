@@ -33,24 +33,25 @@ Valid state transitions enforced by the dispatcher engine:
 5. **No Ambient Randomness:**
    Dispatcher control-plane identifiers (nonces, temporary filenames, unique tags) use cryptographic primitives (`crypto.randomBytes()`) rather than pseudo-random functions like `Math.random()`.
 
-## Persistence Adapter Boundary & Concurrency Control
+## Scope Boundaries & Multi-Runner Durability
 
-### Persistence Boundaries & Multi-Runner Scope
-Local JSON file state on a GitHub Actions runner is an ephemeral execution artifact local to a single runner invocation, **not** durable shared orchestration state across independent GitHub Actions runners or workflow runs.
+### Ephemeral Persistence Limits
+Local JSON file state managed by `FilePersistenceAdapter` is an execution artifact local to a single process/runner instance. It is **not** durable shared orchestration state across independent GitHub Actions runners or workflow invocations.
 
-- Automatic dispatch remains **disabled** until the shared cross-runner persistence adapter (#6) and Jules capacity/API management (#6) are implemented and verified.
-- The SuperMail runtime agent and Gmail scopes remain completely separate from the development dispatcher.
+- **Issue #3 Scope:** Implements the local state machine engine, invariant checks, persistence adapter contracts, and deterministic handoff formatting. It does **not** enable end-to-end automatic dispatch across GitHub Actions runners.
+- **Prerequisites for Automatic Dispatch:** Automatic dispatch remains **disabled** until the shared cross-runner persistence/coordination adapter (#6) and global three-job Jules capacity enforcement (#6) are implemented and verified.
+- **Runtime Separation:** The SuperMail runtime secretary agent and Gmail OAuth scopes remain completely separate from the development dispatcher plane.
 
 ### Engine and Adapter Architecture
 To maintain clean separation of concerns:
 - **`DispatcherEngine`**: Pure state machine and lifecycle invariant engine.
 - **`PersistenceAdapter`**: Abstract storage contract defining `load()`, `save(state, expectedRevision)`, and `withLock(fn)`.
-- **`FilePersistenceAdapter`**: Local file persistence adapter with process PID validation, owner tokens, exclusive cross-process file locking (`.lock`), and Compare-And-Swap (CAS) revision checking.
+- **`FilePersistenceAdapter`**: Local file persistence adapter with PID validation, candidate lock file hardlinking, owner tokens, exclusive cross-process file locking (`.lock`), and Compare-And-Swap (CAS) revision checking.
 - **`MemoryPersistenceAdapter`**: In-memory adapter with in-process locking and CAS revision checking for testing and process-isolated workflows.
 - **Shared Orchestration Layer (#6)**: Future persistent adapter providing cross-runner durability (e.g., GitHub State API / issue store / central store).
 
 ### Concurrency Guarantees (Cross-Process Locking + CAS)
-1. **Exclusive Lock Execution:** File operations (`load` + modification + `save`) acquire a process-exclusive `.lock` file written with an owner token (`PID:ownerTag`). Stale locks (>10s) are stolen only if the owner PID is verified dead (`process.kill(pid, 0)`).
+1. **Exclusive Lock Execution:** File operations (`load` + modification + `save`) acquire a process-exclusive `.lock` file via candidate hardlink creation (`lockPath.candidate.<pid>.<tag>`). Stale locks (>10s) are stolen only if the owner PID is verified dead (`process.kill(pid, 0)`).
 2. **Safe Lock Release:** On lock release, the adapter checks that `.lock` still contains its process owner token before unlinking, preventing stale owners from removing replacement owners' locks.
 3. **CAS / Revision Checking:** Every state modification increments an explicit integer `revision`. When saving, the adapter verifies whether the store revision matches the expected revision loaded before the modification, failing with a CAS conflict (`CAS conflict: expected file revision X, but current file revision is Y`) if modified concurrently.
 

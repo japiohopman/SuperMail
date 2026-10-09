@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The repository prepares every non-draft PR for automated AI review. The GitHub workflow is the handoff layer: it identifies the PR, records the exact head SHA, and starts the provider-neutral review lifecycle.
+The repository prepares every non-draft PR for automated AI review. The GitHub Actions workflow (`.github/workflows/ai-review-handoff.yml`) acts as the trigger layer: it marks non-draft PRs with the `ai-review` label and comments with the exact head SHA to trigger CodeRabbit review requests.
 
 ## Active Reviewer & Relay Boundary
 
@@ -10,9 +10,9 @@ The repository prepares every non-draft PR for automated AI review. The GitHub w
 
 The workflow triggers automated review requests via CodeRabbit for pull requests. The repository configuration lives in `.coderabbit.yaml`.
 
-The relay acts as a control-plane boundary:
+The review boundary operates as follows:
 1. Every review is keyed by `repository + pull_request + head_sha`.
-2. A new head SHA invalidates any previous review state.
+2. A new head SHA invalidates any previous review state and requires a new review.
 3. Review feedback must be evaluated against issue acceptance criteria, architectural rules, security policies, and tests before merge.
 
 ## Provider Neutrality

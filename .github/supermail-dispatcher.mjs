@@ -141,42 +141,51 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
     }
 
     const ownerToken = `${process.pid}:${crypto.randomBytes(8).toString("hex")}`;
+    const candidatePath = `${this.lockPath}.candidate.${process.pid}.${crypto.randomBytes(6).toString("hex")}`;
 
-    while (Date.now() - start < this.lockTimeoutMs) {
-      try {
-        const fd = fs.openSync(this.lockPath, "wx");
-        fs.writeSync(fd, ownerToken);
-        fs.closeSync(fd);
-        this._currentOwnerToken = ownerToken;
-        return;
-      } catch (err) {
-        if (err.code === "EEXIST") {
-          try {
-            const stat = fs.statSync(this.lockPath);
-            const content = fs.existsSync(this.lockPath) ? fs.readFileSync(this.lockPath, "utf8").trim() : "";
-            const lockPid = parseInt(content.split(":")[0], 10);
+    // Create candidate file fully populated with ownerToken before linking
+    fs.writeFileSync(candidatePath, ownerToken, "utf8");
 
-            // Stale takeover condition: lock file mtime > 10s AND owner process is dead
-            if (Date.now() - stat.mtimeMs > 10000 && (!lockPid || !this.isPidAlive(lockPid))) {
-              const stalePath = `${this.lockPath}.stale.${Date.now()}.${crypto.randomBytes(4).toString("hex")}`;
-              try {
-                fs.renameSync(this.lockPath, stalePath);
-                fs.unlinkSync(stalePath);
-              } catch {
-                // Ignore if rename/unlink failed due to concurrent activity
+    try {
+      while (Date.now() - start < this.lockTimeoutMs) {
+        try {
+          fs.linkSync(candidatePath, this.lockPath);
+          this._currentOwnerToken = ownerToken;
+          if (fs.existsSync(candidatePath)) fs.unlinkSync(candidatePath);
+          return;
+        } catch (err) {
+          if (err.code === "EEXIST") {
+            try {
+              const stat = fs.statSync(this.lockPath);
+              const content = fs.existsSync(this.lockPath) ? fs.readFileSync(this.lockPath, "utf8").trim() : "";
+              const lockPid = parseInt(content.split(":")[0], 10);
+
+              // Stale takeover condition: lock file mtime > 10s AND owner process is dead
+              if (Date.now() - stat.mtimeMs > 10000 && (!lockPid || !this.isPidAlive(lockPid))) {
+                const stalePath = `${this.lockPath}.stale.${Date.now()}.${crypto.randomBytes(4).toString("hex")}`;
+                try {
+                  fs.renameSync(this.lockPath, stalePath);
+                  if (fs.existsSync(stalePath)) fs.unlinkSync(stalePath);
+                } catch {
+                  // Ignore if rename or unlink failed due to concurrent activity
+                }
+                continue;
               }
-              continue;
+            } catch {
+              // Lockfile might have been deleted/renamed concurrently
             }
-          } catch {
-            // Lockfile might have been deleted/renamed concurrently
+            await new Promise((resolve) => setTimeout(resolve, this.lockRetryIntervalMs));
+          } else {
+            throw err;
           }
-          await new Promise((resolve) => setTimeout(resolve, this.lockRetryIntervalMs));
-        } else {
-          throw err;
         }
       }
+      throw new Error(`Failed to acquire lock file ${this.lockPath} within ${this.lockTimeoutMs}ms`);
+    } finally {
+      if (fs.existsSync(candidatePath)) {
+        try { fs.unlinkSync(candidatePath); } catch {}
+      }
     }
-    throw new Error(`Failed to acquire lock file ${this.lockPath} within ${this.lockTimeoutMs}ms`);
   }
 
   releaseLock() {

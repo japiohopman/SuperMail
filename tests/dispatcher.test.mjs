@@ -215,6 +215,28 @@ test("releaseClaim safety: rejecting stale or wrong claim IDs without mutating s
   assert.equal(issue.claim.claimId, activeClaimId);
 });
 
+test("FilePersistenceAdapter lock ownership: stale lock holder token cannot remove replacement lock owner", async () => {
+  const filePath = getTempStateFilePath();
+  const adapterOwner1 = new FilePersistenceAdapter(filePath);
+  const adapterOwner2 = new FilePersistenceAdapter(filePath);
+
+  // Owner 1 acquires lock
+  await adapterOwner1.acquireLock();
+  assert.ok(fs.existsSync(adapterOwner1.lockPath));
+
+  // Simulate Owner 2 replacing lock content manually or via takeover
+  const owner2Token = "99999:replacementToken123";
+  fs.writeFileSync(adapterOwner1.lockPath, owner2Token, "utf8");
+
+  // Owner 1 attempts to release lock - must NOT delete Owner 2's lock file
+  adapterOwner1.releaseLock();
+  assert.ok(fs.existsSync(adapterOwner1.lockPath), "Replacement lock file must remain intact");
+  assert.equal(fs.readFileSync(adapterOwner1.lockPath, "utf8").trim(), owner2Token);
+
+  // Clean up
+  if (fs.existsSync(adapterOwner1.lockPath)) fs.unlinkSync(adapterOwner1.lockPath);
+});
+
 test("registerIssue safety: rejecting claim-requiring states when no claim exists", async () => {
   const filePath = getTempStateFilePath();
   const engine = new DispatcherEngine({ filePath });
