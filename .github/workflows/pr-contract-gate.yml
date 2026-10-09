@@ -11,14 +11,13 @@ permissions:
   actions: read
   contents: read
   pull-requests: read
+  issues: read
 
 jobs:
   pr-contract:
     if: >-
       (github.event_name == 'pull_request_target' && github.event.pull_request.draft == false) ||
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.pull_requests[0].number != null)
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     steps:
       # IMPORTANT: pull_request_target must never check out or execute PR-head code.
@@ -49,6 +48,16 @@ jobs:
                   pull_number: linkedPull.number,
                 });
                 pr = response.data;
+              } else {
+                // GitHub can omit workflow_run.pull_requests (notably for some
+                // forked/head-ref combinations). Resolve the open PR by exact SHA.
+                const openPulls = await github.paginate(github.rest.pulls.list, {
+                  owner,
+                  repo,
+                  state: "open",
+                  per_page: 100,
+                });
+                pr = openPulls.find(item => item.head.sha === context.payload.workflow_run.head_sha);
               }
             }
 
@@ -127,35 +136,38 @@ jobs:
               }
             }
 
-            // Inspect commit metadata only; no PR code is checked out or executed.
-            // Support same-repository branches and forks; fail closed if inspection fails.
-            const headOwner = pr.head.repo?.owner?.login ?? owner;
-            const headRepo = pr.head.repo?.name ?? repo;
-            async function getCommitAcrossSourceAndBase(sha) {
-              const candidates = [
-                { owner: headOwner, repo: headRepo },
-                { owner, repo },
-              ];
-              let lastError;
-              for (const candidate of candidates) {
-                try {
-                  return (await github.rest.repos.getCommit({ ...candidate, ref: sha })).data;
-                } catch (error) {
-                  lastError = error;
-                }
-              }
-              throw lastError ?? new Error("Commit metadata is unavailable");
-            }
-
+            // Inspect PR commit metadata via the Pull Requests API so this also
+            // works when the head branch lives in a fork. Never fetch or execute code.
             let lastCommitTreeIdenticalToParent = false;
             let noOpInspectionFailed = false;
             try {
-              const headCommit = await getCommitAcrossSourceAndBase(pr.head.sha);
+              const commits = await github.paginate(github.rest.pulls.listCommits, {
+                owner,
+                repo,
+                pull_number: pr.number,
+                per_page: 100,
+              });
+              const headCommit = commits.find(commit => commit.sha === pr.head.sha) ?? commits[commits.length - 1];
+              if (!headCommit || headCommit.sha !== pr.head.sha) {
+                throw new Error("The current PR head commit was not returned by the Pull Requests API");
+              }
               const parents = headCommit.parents ?? [];
               if (parents.length === 1) {
-                const parentCommit = await getCommitAcrossSourceAndBase(parents[0].sha);
-                lastCommitTreeIdenticalToParent =
-                  headCommit.commit.tree.sha === parentCommit.commit.tree.sha;
+                let parentCommit = commits.find(commit => commit.sha === parents[0].sha);
+                if (!parentCommit) {
+                  const parentResponse = await github.rest.repos.getCommit({
+                    owner,
+                    repo,
+                    ref: parents[0].sha,
+                  });
+                  parentCommit = parentResponse.data;
+                }
+                const headTree = headCommit.commit?.tree?.sha;
+                const parentTree = parentCommit.commit?.tree?.sha;
+                if (!headTree || !parentTree) {
+                  throw new Error("The head or parent tree SHA is unavailable");
+                }
+                lastCommitTreeIdenticalToParent = headTree === parentTree;
               }
             } catch (error) {
               noOpInspectionFailed = true;
