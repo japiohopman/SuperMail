@@ -53,6 +53,12 @@ Jules must verify and report all of the following against the current head:
 
 If a PR body cannot be updated, report the reason in a PR conversation comment and explicitly flag the missing status update.
 
+## Automated PR contract gate
+
+`.github/workflows/pr-contract-gate.yml` enforces the non-draft review handoff. Draft PRs may remain incomplete. A non-draft PR must report `READY FOR REVIEW`, carry the current exact head SHA, list every changed path, check all acceptance criteria, and provide `npm test`, `npm run lint`, `npm run typecheck`, and `npm run build` evidence tied to a successful CI run on that exact SHA. Blockers must be explicitly absent or documented; the latest reviewer instruction and safety impact must be present. A no-op latest commit fails the gate.
+
+The gate uses read-only GitHub metadata and checks out only the trusted base/default branch. Never change this to check out or execute PR-head code under `pull_request_target`. The gate does not approve, merge, or dispatch work. Detailed rules and recovery expectations live in `docs/PR-CONTRACT.md`.
+
 ## Review contract
 
 Every review receives the issue and acceptance criteria, PR description, complete diff, CI state, relevant architecture/security docs, and previous review state for the PR head SHA.
