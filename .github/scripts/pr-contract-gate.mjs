@@ -64,10 +64,11 @@ export function validatePrContract(input) {
   if (isPlaceholder(changedFilesField)) {
     errors.push("Changed files must list the actual paths and explain the substantive changes.");
   }
+  const handoff = getSection(body, "## Status and handoff");
   const changedFiles = Array.isArray(input.changedFiles) ? input.changedFiles : [];
   if (changedFiles.length === 0) errors.push("GitHub reports no changed files for this PR.");
   for (const path of changedFiles) {
-    if (!body.includes(path)) errors.push(`Changed files list is missing path: ${path}`);
+    if (!handoff.includes(path)) errors.push(`Changed files list is missing path: ${path}`);
   }
 
   const remaining = getField(body, "Remaining blockers/risks");
