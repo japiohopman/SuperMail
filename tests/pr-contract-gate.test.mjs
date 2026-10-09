@@ -9,6 +9,7 @@ const CI_URL = "https://github.com/japiohopman/SuperMail/actions/runs/12345";
 function validInput(overrides = {}) {
   const lines = [
     "## Change",
+    "- **Governing issue:** #13",
     "Issue #2 workflow foundation and communication enforcement.",
     "",
     "## Status and handoff",
@@ -52,6 +53,7 @@ function validInput(overrides = {}) {
     draft: false,
     headSha: HEAD,
     changedFiles: FILES,
+    governingIssueIsValid: true,
     verifiedCiRunIds: ["12345"],
     lastCommitTreeIdenticalToParent: false,
     noOpInspectionFailed: false,
@@ -62,6 +64,16 @@ function validInput(overrides = {}) {
 test("accepts a complete, current contract backed by successful CI for its head SHA", () => {
   const result = validatePrContract(validInput());
   assert.equal(result.ok, true, result.errors.join("\n"));
+});
+
+test("rejects a missing or non-open governing issue", () => {
+  const missing = validatePrContract(validInput({ body: validInput().body.replace("- **Governing issue:** #13", "- **Governing issue:** TBD") }));
+  assert.equal(missing.ok, false);
+  assert.ok(missing.errors.some((error) => error.includes("Governing issue must be the number")));
+
+  const closed = validatePrContract(validInput({ governingIssueIsValid: false }));
+  assert.equal(closed.ok, false);
+  assert.ok(closed.errors.some((error) => error.includes("must exist, remain open")));
 });
 
 test("skips draft PRs so work in progress can remain incomplete", () => {
