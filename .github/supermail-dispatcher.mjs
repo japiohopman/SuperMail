@@ -160,14 +160,43 @@ export class FilePersistenceAdapter extends PersistenceAdapter {
               const content = fs.existsSync(this.lockPath) ? fs.readFileSync(this.lockPath, "utf8").trim() : "";
               const lockPid = parseInt(content.split(":")[0], 10);
 
-              // Stale takeover condition: lock file mtime > 10s AND owner process is dead
+              // A stale observation is only a hint. Serialize takeover and re-read
+              // the exact lock inode/token while holding the exclusive guard.
               if (Date.now() - stat.mtimeMs > 10000 && (!lockPid || !this.isPidAlive(lockPid))) {
-                const stalePath = `${this.lockPath}.stale.${Date.now()}.${crypto.randomBytes(4).toString("hex")}`;
+                const takeoverPath = `${this.lockPath}.takeover`;
+                let ownsTakeoverGuard = false;
                 try {
-                  fs.renameSync(this.lockPath, stalePath);
-                  if (fs.existsSync(stalePath)) fs.unlinkSync(stalePath);
-                } catch {
-                  // Ignore if rename or unlink failed due to concurrent activity
+                  fs.mkdirSync(takeoverPath);
+                  ownsTakeoverGuard = true;
+                } catch (guardError) {
+                  if (guardError.code !== "EEXIST") throw guardError;
+                }
+
+                if (ownsTakeoverGuard) {
+                  try {
+                    const currentStat = fs.statSync(this.lockPath);
+                    const currentContent = fs.readFileSync(this.lockPath, "utf8").trim();
+                    const currentPid = parseInt(currentContent.split(":")[0], 10);
+                    const sameObservedLock =
+                      currentStat.dev === stat.dev &&
+                      currentStat.ino === stat.ino &&
+                      currentStat.mtimeMs === stat.mtimeMs &&
+                      currentContent === content;
+                    const stillStale =
+                      Date.now() - currentStat.mtimeMs > 10000 &&
+                      (!currentPid || !this.isPidAlive(currentPid));
+
+                    if (sameObservedLock && stillStale) {
+                      const stalePath = `${this.lockPath}.stale.${Date.now()}.${crypto.randomBytes(4).toString("hex")}`;
+                      // Only one waiter can re-check and move a stale lock at a time.
+                      fs.renameSync(this.lockPath, stalePath);
+                      try { fs.unlinkSync(stalePath); } catch {}
+                    }
+                  } catch (takeoverError) {
+                    if (takeoverError.code !== "ENOENT") throw takeoverError;
+                  } finally {
+                    try { fs.rmdirSync(takeoverPath); } catch {}
+                  }
                 }
                 continue;
               }
