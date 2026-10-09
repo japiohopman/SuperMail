@@ -27,10 +27,10 @@ function validInput(overrides = {}) {
     "- [x] Required validation and handoff fields are present.",
     "",
     "## Verification",
-    "- [x] npm test — passed on head SHA " + HEAD + "; CI: " + CI_URL,
-    "- [x] npm run lint — passed on head SHA " + HEAD + "; CI: " + CI_URL,
-    "- [x] npm run typecheck — passed on head SHA " + HEAD + "; CI: " + CI_URL,
-    "- [x] npm run build — passed on head SHA " + HEAD + "; CI: " + CI_URL,
+    "- [x] npm test — passed; tested SHA: " + HEAD + " (PR head); CI: " + CI_URL,
+    "- [x] npm run lint — passed; tested SHA: " + HEAD + " (PR head); CI: " + CI_URL,
+    "- [x] npm run typecheck — passed; tested SHA: " + HEAD + " (PR head); CI: " + CI_URL,
+    "- [x] npm run build — passed; tested SHA: " + HEAD + " (PR head); CI: " + CI_URL,
     "- [x] Security impact considered.",
     "- [x] Documentation updated.",
     "- [x] No secrets or real mailbox data included.",
@@ -52,9 +52,10 @@ function validInput(overrides = {}) {
     body: lines.join("\n"),
     draft: false,
     headSha: HEAD,
+    mergeSha: null,
     changedFiles: FILES,
     governingIssueIsValid: true,
-    verifiedCiRunIds: ["12345"],
+    verifiedCiRuns: [{ id: "12345", sha: HEAD, target: "PR head" }],
     lastCommitTreeIdenticalToParent: false,
     noOpInspectionFailed: false,
     ...overrides,
@@ -112,7 +113,7 @@ test("rejects a no-op head commit even when the PR body looks complete", () => {
 
 test("rejects missing or failed required command evidence", () => {
   const body = validInput().body.replace(
-    "- [x] npm run build — passed on head SHA " + HEAD + "; CI: " + CI_URL,
+    "- [x] npm run build — passed; tested SHA: " + HEAD + " (PR head); CI: " + CI_URL,
     "- [x] npm run build — failed on head SHA " + HEAD
   );
   const result = validatePrContract(validInput({ body }));
@@ -120,10 +121,34 @@ test("rejects missing or failed required command evidence", () => {
   assert.ok(result.errors.some((error) => error.includes("npm run build as passed")));
 });
 
-test("rejects a CI link that is not verified for the current head", () => {
-  const result = validatePrContract(validInput({ verifiedCiRunIds: [] }));
+test("rejects a CI link that is not verified for the declared tested SHA", () => {
+  const result = validatePrContract(validInput({ verifiedCiRuns: [] }));
   assert.equal(result.ok, false);
-  assert.equal(result.errors.filter((error) => error.includes("successful CI run on the current head")).length, 4);
+  assert.equal(result.errors.filter((error) => error.includes("successful CI run whose tested SHA")).length, 4);
+});
+
+test("accepts verified CI evidence for the current merge commit when explicitly labeled", () => {
+  const mergeSha = "b".repeat(40);
+  const body = validInput().body.replaceAll(`tested SHA: ${HEAD} (PR head)`, `tested SHA: ${mergeSha} (merge commit)`);
+  const result = validatePrContract(validInput({
+    body,
+    mergeSha,
+    verifiedCiRuns: [{ id: "12345", sha: mergeSha, target: "merge commit" }],
+  }));
+  assert.equal(result.ok, true, result.errors.join("\\n"));
+});
+
+test("rejects a stale merge-commit SHA after the merge ref changes", () => {
+  const staleMergeSha = "b".repeat(40);
+  const currentMergeSha = "c".repeat(40);
+  const body = validInput().body.replaceAll(`tested SHA: ${HEAD} (PR head)`, `tested SHA: ${staleMergeSha} (merge commit)`);
+  const result = validatePrContract(validInput({
+    body,
+    mergeSha: currentMergeSha,
+    verifiedCiRuns: [{ id: "12345", sha: staleMergeSha, target: "merge commit" }],
+  }));
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("does not match the live PR merge commit")));
 });
 
 test("fails closed when commit-tree inspection cannot be completed", () => {
