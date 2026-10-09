@@ -29,6 +29,20 @@ The workflow uses `pull_request_target` for metadata inspection. It checks out o
 
 CI continues to run under the separate `pull_request` workflow. This contract gate does not approve reviews, merge PRs, start Jules sessions, or claim that a reviewer agrees with the changes.
 
+## First rollout and post-merge smoke test
+
+The first PR that introduces this workflow cannot be validated by the workflow on its own PR: `pull_request_target` loads its workflow definition from the trusted base branch, and that base does not contain the new gate yet. For this bootstrap PR, use the normal repository CI plus human review; do not claim the gate's live event wiring has already run.
+
+After the gate reaches `main`:
+
+1. Keep Issue #13 open until the live Actions behavior is proven.
+2. Use an existing non-draft PR with a complete, current contract (PR #12 is the initial candidate) and make a harmless PR-body edit that preserves its contract fields. Confirm `PR Contract Gate` runs on the PR metadata event.
+3. Confirm its linked CI run is successful for the same head SHA and every required CI step is reported as successful.
+4. Confirm the gate also re-evaluates when that head's `CI` workflow completes successfully, including when the first gate run happened before CI finished.
+5. If the gate fails, fix the cause and repeat the smoke test. Do not dispatch Issue #2 until this bootstrap check and the blocked dispatcher path are understood.
+
+This smoke test is rollout verification, not an exception that should remain in the steady-state process. New non-draft PRs must pass the contract gate normally.
+
 ## Updating the handoff
 
 When head code changes, update the current head SHA, changed-file list, acceptance criteria, and each verification line after CI completes. Every command line must include the new full SHA and link to a successful `CI` run for that SHA. Preserve incomplete criteria as unchecked while the PR remains Draft. Never use a green CI run to conceal an unresolved functional, security, architecture, or tooling blocker.
