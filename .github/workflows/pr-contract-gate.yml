@@ -68,7 +68,8 @@ jobs:
                 headSha: "",
                 changedFiles: [],
                 governingIssueIsValid: false,
-                verifiedCiRunIds: [],
+                verifiedCiRuns: [],
+                mergeSha: pr?.merge_commit_sha ?? null,
                 lastCommitTreeIdenticalToParent: false,
                 noOpInspectionFailed: false,
               }, null, 2));
@@ -102,7 +103,7 @@ jobs:
             const citedRunIds = [...new Set(
               [...(pr.body ?? "").matchAll(/actions\/runs\/(\d+)/g)].map(match => match[1])
             )];
-            const verifiedCiRunIds = [];
+            const verifiedCiRuns = [];
             for (const runId of citedRunIds) {
               try {
                 const response = await github.rest.actions.getWorkflowRun({
@@ -111,7 +112,10 @@ jobs:
                   run_id: Number(runId),
                 });
                 const run = response.data;
-                if (run.name === "CI" && run.conclusion === "success" && run.head_sha === pr.head.sha) {
+                const testedTarget = run.head_sha === pr.head.sha
+                  ? "PR head"
+                  : (pr.merge_commit_sha && run.head_sha === pr.merge_commit_sha ? "merge commit" : null);
+                if (run.name === "CI" && run.conclusion === "success" && testedTarget) {
                   const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
                     owner,
                     repo,
@@ -126,7 +130,7 @@ jobs:
                   }
                   const requiredSteps = ["Run tests", "Lint", "Typecheck", "Build"];
                   if (requiredSteps.every(name => stepResults.get(name) === "success")) {
-                    verifiedCiRunIds.push(String(run.id));
+                    verifiedCiRuns.push({ id: String(run.id), sha: run.head_sha, target: testedTarget });
                   } else {
                     core.info("CI run " + runId + " did not successfully execute every required verification step.");
                   }
@@ -180,7 +184,8 @@ jobs:
               headSha: pr.head.sha,
               changedFiles: files.map(file => file.filename),
               governingIssueIsValid,
-              verifiedCiRunIds,
+              verifiedCiRuns,
+              mergeSha: pr.merge_commit_sha ?? null,
               lastCommitTreeIdenticalToParent,
               noOpInspectionFailed,
             }, null, 2));
