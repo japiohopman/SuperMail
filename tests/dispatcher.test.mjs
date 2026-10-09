@@ -357,6 +357,7 @@ test("real multi-process concurrent claim race: failure-safe child process test"
       return new Promise((resolve) => {
         let settled = false;
         const child = fork(tmpScript, [filePath, `proc-${i}`], { stdio: "ignore" });
+        childProcesses.push(child);
 
         const safeResolve = (data) => {
           if (!settled) {
@@ -383,12 +384,91 @@ test("real multi-process concurrent claim race: failure-safe child process test"
     assert.equal(successes.length, 1, "Exactly one process must successfully claim");
     assert.equal(failures.length, 3, "Remaining processes must fail cleanly");
   } finally {
+    for (const child of childProcesses) {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    }
+    await Promise.all(childProcesses.map((child) => new Promise((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      child.once("exit", resolve);
+      child.once("error", resolve);
+    })));
     if (fs.existsSync(tmpScript)) fs.unlinkSync(tmpScript);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     if (fs.existsSync(`${filePath}.lock`)) fs.unlinkSync(`${filePath}.lock`);
   }
 });
 
+test("competing OS processes cannot steal a replacement lock during stale takeover", async () => {
+  const filePath = getTempStateFilePath();
+  const lockPath = `${filePath}.lock`;
+  const tmpScript = path.join(os.tmpdir(), `dispatcher-lock-child-${process.pid}-${Date.now()}.mjs`);
+  const children = [];
+  const acquired = [];
+  const failures = [];
+
+  fs.writeFileSync(lockPath, "99999999:dead-owner", "utf8");
+  const staleTime = new Date(Date.now() - 20000);
+  fs.utimesSync(lockPath, staleTime, staleTime);
+
+  const childScript = `
+    import { FilePersistenceAdapter } from ${JSON.stringify(path.resolve(process.cwd(), ".github/supermail-dispatcher.mjs"))};
+    const adapter = new FilePersistenceAdapter(process.argv[2], { lockTimeoutMs: 450, lockRetryIntervalMs: 5 });
+    try {
+      await adapter.acquireLock();
+      process.send({ type: "acquired", token: adapter._currentOwnerToken });
+      process.on("message", (message) => {
+        if (message === "release") { adapter.releaseLock(); process.exit(0); }
+      });
+    } catch (error) {
+      process.send({ type: "failed", error: error.message });
+      process.exit(2);
+    }
+  `;
+  fs.writeFileSync(tmpScript, childScript, "utf8");
+
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      const child = fork(tmpScript, [filePath], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+      children.push(child);
+      child.on("message", (message) => {
+        if (message.type === "acquired") acquired.push({ child, token: message.token });
+        else failures.push(message);
+      });
+    }
+
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && acquired.length + failures.length < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    assert.equal(acquired.length, 1, "exactly one process must take over and acquire the stale lock");
+    assert.equal(failures.length, 1, "the competing process must time out rather than steal the new owner lock");
+    assert.equal(fs.readFileSync(lockPath, "utf8").trim(), acquired[0].token,
+      "the active owner replacement lock must remain intact");
+
+    acquired[0].child.send("release");
+    await new Promise((resolve) => acquired[0].child.once("exit", resolve));
+    assert.equal(fs.existsSync(lockPath), false, "the owner should release its own lock");
+  } finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        try { child.kill("SIGTERM"); } catch {}
+      }
+    }
+    await Promise.all(children.map((child) => new Promise((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      child.once("exit", resolve);
+      child.once("error", resolve);
+    })));
+    for (const pathToRemove of [tmpScript, filePath, lockPath, `${lockPath}.takeover`]) {
+      if (fs.existsSync(pathToRemove)) {
+        try { fs.rmSync(pathToRemove, { recursive: true, force: true }); } catch {}
+      }
+    }
+    const dir = path.dirname(filePath);
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 test("FilePersistenceAdapter handles malformed state JSON by throwing syntax error", async () => {
   const filePath = getTempStateFilePath();
   fs.writeFileSync(filePath, "{ invalid json ...", "utf8");
