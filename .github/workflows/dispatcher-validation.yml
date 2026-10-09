@@ -1,0 +1,36 @@
+name: Dispatcher Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  dispatcher-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run unit and concurrency tests
+        run: npm test
+
+      - name: Check syntax
+        run: npm run lint
+
+      - name: Verify typecheck command
+        run: npm run typecheck
+
+      - name: Verify build command
+        run: npm run build
