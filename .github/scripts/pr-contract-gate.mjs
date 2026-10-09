@@ -44,6 +44,14 @@ export function validatePrContract(input) {
     if (!body.includes(heading)) errors.push(`Missing required section: ${heading}`);
   }
 
+  const governingIssueField = getField(body, "Governing issue");
+  const governingIssueMatch = governingIssueField.match(/^#?(\\d+)\\s*$/);
+  if (!governingIssueMatch) {
+    errors.push("Governing issue must be the number of an existing open issue, not a PR.");
+  } else if (input.governingIssueIsValid !== true) {
+    errors.push(`Governing issue #${governingIssueMatch[1]} must exist, remain open, and not be a pull request.`);
+  }
+
   const statusField = getField(body, "Status");
   const statusMatch = statusField.match(/^\x60?(IN PROGRESS|BLOCKED|READY FOR REVIEW)\x60?\s*$/i);
   const status = statusMatch?.[1]?.toUpperCase() ?? "";
